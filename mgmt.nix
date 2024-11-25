@@ -18,8 +18,8 @@ buildGoModule rec {
   src = fetchFromGitHub {
     owner = "purpleidea";
     repo = pname;
-    rev = "7596f5b572f24e7f5a723ec0a1b4860a561c6705";
-    hash = "sha256-LBUF31xCdyiuyp2UNgZ74F55xEebtyKO3qcQPx/MR6c=";
+    rev = "380004b1dccb1c76c2d87c5473c4dc105c8a6319";
+    hash = "sha256-+LQaqCM2UUBLCkCCJ30KQTA1VYEyX6zym/dp415IIVA=";
   };
 
   # patching must be done in prebuild, so it is shared with goModules
@@ -58,7 +58,7 @@ buildGoModule rec {
 
   subPackages = ["."];
 
-  vendorHash = "sha256-taHLsfH9uuxj68C6wc/Fa27p5IXA/uEgWAwcg/1CWVE=";
+  vendorHash = "sha256-/CimTvGwIowOdti9+pg2rQV9eEhhJ/zpVeZSlvUd3uE=";
 
   meta = with lib; {
     description = "Next generation distributed, event-driven, parallel config management!";
