@@ -100,7 +100,7 @@ repo --name="{{ $name }}" --baseurl="{{ $baseurl }}"
 #
 #	packages
 #
-%packages
+%packages --timeout 60 --retries 3 # handle spurious failures
 @core
 @standard
 @hardware-support
@@ -174,7 +174,7 @@ echo .
 #
 #	post
 #
-%post
+%post --log /root/post_ks.log --erroronfail
 {{ range $i, $x := .post -}}
 {{ $x }}
 {{ end -}}

@@ -346,11 +346,16 @@ func (obj *Main) Run() error {
 		prefix = *p
 	}
 	// make sure the working directory prefix exists
-	if obj.TmpPrefix || os.MkdirAll(prefix, 0770) != nil {
+	if obj.TmpPrefix || os.MkdirAll(prefix, 0775) != nil { // 0775 =D
 		if obj.TmpPrefix || obj.AllowTmpPrefix {
 			var err error
+			// This temp dir always gets created with 0700 mode. :(
 			if prefix, err = os.MkdirTemp("", obj.Program+"-"+hostname+"-"); err != nil {
 				return fmt.Errorf("can't create temporary prefix")
+			}
+			// 0775 since we want children to be able to read this!
+			if err := os.Chmod(prefix, 0775); err != nil {
+				return fmt.Errorf("can't set mode correctly")
 			}
 			Logf("warning: working prefix directory is temporary!")
 
@@ -392,7 +397,8 @@ func (obj *Main) Run() error {
 			obj.Logf("pgp: "+format, v...)
 		}
 		pgpPrefix := fmt.Sprintf("%s/", path.Join(prefix, "pgp"))
-		if err := os.MkdirAll(pgpPrefix, 0770); err != nil {
+		// 0700 since we DON'T want anyone else to be able to read this!
+		if err := os.MkdirAll(pgpPrefix, 0700); err != nil {
 			return errwrap.Wrapf(err, "can't create pgp prefix")
 		}
 
@@ -586,6 +592,8 @@ func (obj *Main) Run() error {
 		},
 	}).Init()
 
+	var gapiInfoResult *gapi.InfoResult
+
 	// implementation of the World API (alternatives can be substituted in)
 	// XXX: The "implementation of the World API" should have more than just
 	// etcd in it, so this could live elsewhere package wise and just have
@@ -599,6 +607,12 @@ func (obj *Main) Run() error {
 		Debug:          obj.Debug,
 		Logf: func(format string, v ...interface{}) {
 			obj.Logf("world: etcd: "+format, v...)
+		},
+		GetURI: func() string {
+			if gapiInfoResult == nil {
+				return ""
+			}
+			return gapiInfoResult.URI
 		},
 	}
 
@@ -721,6 +735,7 @@ func (obj *Main) Run() error {
 					}
 					// this must generate at least one event for it to work
 					gapiChan = gapiImpl.Next() // stream of graph switch events!
+					gapiInfoResult = gapiImpl.Info()
 				}
 				continue
 
@@ -783,6 +798,9 @@ func (obj *Main) Run() error {
 				Logf("graph validate failed: %+v", err)
 				continue
 			}
+
+			// TODO: Apply/push gapiInfoResult into resources and/or
+			// engine in the future if we decide we need to do that!
 
 			// apply the global metaparams to the graph
 			if err := obj.ge.Apply(func(graph *pgraph.Graph) error {

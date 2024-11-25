@@ -33,7 +33,11 @@
 import "convert"
 import "deploy"
 import "fmt"
+import "golang"
+import "golang/path/filepath"
 import "golang/strings"
+import "list"
+import "local"
 import "net"
 import "os"
 import "value"
@@ -101,7 +105,7 @@ class base($config) {
 	#	packages
 	#
 	# TODO: do we need "syslinux-nonlinux" ?
-	$pkgs_bios = ["syslinux", "syslinux-nonlinux",]
+	$pkgs_bios = ["syslinux",]
 	$pkgs_uefi = ["shim-x64", "grub2-efi-x64",]
 	pkg $pkgs_bios {
 		state => "installed",
@@ -110,10 +114,11 @@ class base($config) {
 	#	state => "installed",
 	#}
 
-	$pkgs_kickstart = ["fedora-kickstarts", "spin-kickstarts",]
-	pkg $pkgs_kickstart {
-		state => "installed",
-	}
+	# TODO: not in F39+ it seems
+	#$pkgs_kickstart = ["fedora-kickstarts", "spin-kickstarts",]
+	#pkg $pkgs_kickstart {
+	#	state => "installed",
+	#}
 
 	#
 	#	firewalld
@@ -173,7 +178,7 @@ class base($config) {
 	#
 	dhcp:server ":67" {
 		interface => $interface, # required for now
-		leasetime => "60s",
+		leasetime => "10m", # seems some clients refresh half way at 5m
 		dns => $dns,	# pick your own better ones!
 		routers => [$router_ip,],
 
@@ -202,8 +207,57 @@ class base($config) {
 		purge => true, # remove unmanaged files in here
 	}
 
+	$vardir = local.vardir("provisioner/")
+	$binary_path = deploy.binary_path()
+
+	http:file "/mgmt/binary" { # TODO: support different architectures
+		path => $binary_path, # TODO: As long as binary doesn't contain private data!
+
+		Before => Print["ready"],
+	}
+
+	# XXX: don't put anything private in your code this isn't authenticated!
+	$abs_tar = "${vardir}deploys/deploy.tar"
+	$abs_gz = "${abs_tar}.gz"
+
+	file "${vardir}deploys/" {
+		state => $const.res.file.state.exists,
+		recurse => true,
+		purge => true,
+		owner => "root",
+		group => "root",
+		mode => "u=rwx,g=rx,o=", # dir
+	}
+	# Tag this so that the folder purge doesn't remove it. (XXX: bug!)
+	file "${abs_tar}" {
+		owner => "root",
+		group => "root",
+		mode => "u=rw,g=rw,o=", # file
+
+		Meta:retry => -1, # changing the mode on this file can be racy
+	}
+	file "${abs_gz}" {
+		owner => "root",
+		group => "root",
+		mode => "u=rw,g=rw,o=", # file
+
+		Meta:retry => -1, # changing the mode on this file can be racy
+	}
+	deploy:tar "${abs_tar}" {
+		Before => Gzip["${abs_gz}"],
+		Depend => File["${vardir}deploys/"], # make the dir first!
+	}
+	gzip "${abs_gz}" {
+		input => "${abs_tar}",
+	}
+	http:file "/mgmt/deploy.tar.gz" {
+		path => "${abs_gz}",
+	}
+
 	print "ready" {
 		msg => "ready to provision!",
+
+		Meta:autogroup => false,
 
 		Depend => Tftp:Server[":69"],
 		Depend => Dhcp:Server[":67"],
@@ -309,11 +363,11 @@ class base:repo($config) {
 
 		Depend => Exec["uefi-extract-${uid}"],
 	}
-	#tftp:file "/uefi/grubx64.efi" {	# not used
-	#	path => "${uefi_root}grubx64.efi",		# TODO: add autoedges
-	#
-	#	Depend => Exec["uefi-extract-${uid}"],
-	#}
+	tftp:file "/uefi/grubx64.efi" {	# sometimes used?
+		path => "${uefi_root}grubx64.efi",		# TODO: add autoedges
+
+		Depend => Exec["uefi-extract-${uid}"],
+	}
 	tftp:file "grubx64.efi" {	# no leading slash
 		path => "${uefi_root}grubx64.efi",		# TODO: add autoedges
 
@@ -391,6 +445,34 @@ class base:repo($config) {
 			cache => $distroarch_updates_http_prefix, # $prefix/http/fedora39-x86_64/updates/
 		}
 	}
+
+	# .repo files
+	#$fedora_repo_template = struct{
+	#	name => "fedora",
+	#	distro => $distro,
+	#	version => $version,		# 39 for fedora 39
+	#	arch => $arch,			# could also be aarch64
+	#	#flavour => "Everything",	# The install repo uses "Everything" even for "Workstation" or "Server"
+	#	extra => "releases",
+	#
+	#	baseurl => "http://${router_ip}:${http_port_str}/fedora/releases/${version}/Everything/${arch}/os/",
+	#}
+	#$updates_repo_template = struct{
+	#	name => "updates",
+	#	distro => $distro,
+	#	version => $version,		# 39 for fedora 39
+	#	arch => $arch,			# could also be aarch64
+	#	#flavour => "Everything",	# The install repo uses "Everything" even for "Workstation" or "Server"
+	#	extra => "updates",
+	#
+	#	baseurl => "http://${router_ip}:${http_port_str}/fedora/updates/${version}/Everything/${arch}/",
+	#}
+	#http:file "/fedora/${uid}/fedora.repo" {
+	#	data => golang.template(deploy.readfile("/files/repo.tmpl"), $fedora_repo_template),
+	#}
+	#http:file "/fedora/${uid}/updates.repo" {
+	#	data => golang.template(deploy.readfile("/files/repo.tmpl"), $updates_repo_template),
+	#}
 
 	#
 	#	rsync
@@ -473,6 +555,10 @@ class base:host($name, $config) {
 
 	# should we provision this host by default?
 	$provision_default = $config->provision || false # false is safest!
+
+	$handoff_type = $config->handoff || ""
+	$handoff_code = $config->handoff_code || ""
+	panic(not strings.has_prefix($handoff_code, "/"))
 
 	# unique host key which is usually a mac address unless it's a default
 	$hkey = if $mac == "" {
@@ -570,16 +656,114 @@ class base:host($name, $config) {
 
 	if $bios {
 		tftp:file "${bios_menu}" {	# for bios
-			data => template(deploy.readfile("/files/bios-menu.tmpl"), $tftp_menu_template),
+			data => golang.template(deploy.readfile("/files/bios-menu.tmpl"), $tftp_menu_template),
 		}
 	} else {
 		tftp:file "${uefi_menu}" {	# for uefi
 			# XXX: linuxefi & initrdefi VS. kernel & append ?
-			data => template(deploy.readfile("/files/uefi-menu.tmpl"), $tftp_menu_template),
+			data => golang.template(deploy.readfile("/files/uefi-menu.tmpl"), $tftp_menu_template),
 
 			#Depend => Pkg[$pkgs_uefi],
 			#Depend => Exec["uefi-extract"],
 		}
+	}
+
+	# If it's a dir we don't need a suffix, otherwise return the last chunk.
+	$handoff_code_chunk = if strings.has_suffix($prefix, "/") {
+		""
+	} else {
+		filepath.base($handoff_code)
+	}
+	if $handoff_code != "" { # it's a file path or dir!
+		$abs_tar = "${vardir}deploys/deploy-${provision_key}.tar"
+		$abs_gz = "${abs_tar}.gz"
+
+		# Tag this so that the folder purge doesn't remove it. (XXX: bug!)
+		file "${abs_tar}" {
+			owner => "root",
+			group => "root",
+			mode => "u=rw,g=rw,o=", # file
+
+			Meta:retry => -1, # changing the mode on this file can be racy
+		}
+		file "${abs_gz}" {
+			owner => "root",
+			group => "root",
+			mode => "u=rw,g=rw,o=", # file
+
+			Meta:retry => -1, # changing the mode on this file can be racy
+		}
+		tar "${abs_tar}" {
+			inputs => [
+				$handoff_code, # code comes in here!
+			],
+
+			Before => Gzip["${abs_gz}"],
+			Depend => File["${vardir}deploys/"], # make the dir first!
+		}
+		gzip "${abs_gz}" {
+			input => "${abs_tar}",
+		}
+		http:file "/mgmt/deploy-${provision_key}.tar.gz" {
+			path => "${abs_gz}",
+		}
+	}
+
+	$handoff_binary_path = "/usr/local/bin/mgmt" # we install it here
+	$firstboot_scripts_dir = "/var/lib/mgmt-firstboot/" # TODO: /usr/lib/ instead?
+	$firstboot_done_dir = "/var/lib/mgmt-firstboot/done/"
+	$deploy_dir = "/root/mgmt-deploy/" # deploy code dir
+	# TODO: we can customize these more precisely based on $handoff_type
+	$handoff_packages = deploy.bootstrap_packages($distro) # TODO: catch errors here with || []
+	panic($handoff_type != "" and len($handoff_packages) == 0)
+	#$handoff_packages_string = strings.join($handoff_packages, " ")
+
+	$handoff_binary = if $handoff_type == "" {
+		""
+	} else {
+		# Copy over the actual mgmt binary. This enables a lot below...
+		"/usr/bin/wget -O '${handoff_binary_path}' 'http://${router_ip}:${http_port_str}/mgmt/binary' && /usr/bin/chmod u+x '${handoff_binary_path}'"
+	}
+	$handoff_cpcode = if $handoff_type == "" {
+		""
+	} else {
+		# Download a tar ball of our code.
+		# TODO: Alternate mechanisms of getting the code are possible.
+		if $handoff_code != "" {
+			"/usr/bin/wget -O /root/mgmt-deploy.tar.gz 'http://${router_ip}:${http_port_str}/mgmt/deploy-${provision_key}.tar.gz' && /usr/bin/mkdir '${deploy_dir}' && /usr/bin/tar -xf /root/mgmt-deploy.tar.gz --directory '${deploy_dir}'"
+		} else {
+			"/usr/bin/wget -O /root/mgmt-deploy.tar.gz 'http://${router_ip}:${http_port_str}/mgmt/deploy.tar.gz' && /usr/bin/mkdir '${deploy_dir}' && /usr/bin/tar -xf /root/mgmt-deploy.tar.gz --directory '${deploy_dir}'"
+		}
+	}
+	$handoff_service = if $handoff_type == "" {
+		""
+	} else {
+		# Setup the mgmt service, which starts on firstboot.
+		"${handoff_binary_path} setup svc --binary-path='${handoff_binary_path}' --install --enable"
+	}
+	$handoff_firstboot = if $handoff_type == "" {
+		""
+	} else {
+		# Setup the firstboot service itself.
+		"${handoff_binary_path} setup firstboot --binary-path='${handoff_binary_path}' --mkdir --install --enable --scripts-dir='${firstboot_scripts_dir}' --done-dir='${firstboot_done_dir}'"
+	}
+	$handoff_deploy = if $handoff_type == "" {
+		""
+	} else {
+		# Add a script that will run by our firstboot service on boot.
+		# It seems that the deploy will hang until mgmt is started...
+		# NOTE: We need to add the $handoff_code arg the same way it was
+		# passed into the provisioner. It's just now in a deploy subdir.
+		# If it's a dir, then this becomes the empty strings.
+		# XXX: The deploy could instead happen over the network to etcd.
+		"echo '#!/bin/bash' > ${firstboot_scripts_dir}mgmt-deploy.sh && echo '${handoff_binary_path} deploy lang --seeds=http://127.0.0.1:2379 --no-git ${deploy_dir}${handoff_code_chunk}' >> ${firstboot_scripts_dir}mgmt-deploy.sh && chmod u+x ${firstboot_scripts_dir}mgmt-deploy.sh"
+	}
+
+	# TODO: Do we want to signal an http:flag if we're a "default" host?
+	$provisioning_done = if $provision_key == "default" {
+		""
+	} else {
+		"/usr/bin/wget --post-data 'done=true&password=sha1TODO' -O - 'http://${router_ip}:${http_port_str}/action/done/mac=${provision_key}'"
 	}
 
 	$http_kickstart_template = struct{
@@ -602,20 +786,34 @@ class base:host($name, $config) {
 		#	"fedora" => "https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-\$releasever&arch=\$basearch",
 		#	"updates" => "https://mirrors.fedoraproject.org/mirrorlist?repo=updates-released-f\$releasever&arch=\$basearch",
 		#},
-		packages => $packages,
+		# We need $handoff_packages installed in the _KICKSTART_ environ
+		# so that we can actually run mgmt to do our work for us below!
+		packages => list.concat($packages, $handoff_packages),
+		# XXX: is wget segfaulting in the kickstart environment? curl is OK.
+		#pre => [
+		#	"/usr/bin/mkdir /etc/yum.repos.d/",
+		#	"/usr/bin/wget 'http://${router_ip}:${http_port_str}/fedora/${repouid}/fedora.repo' -O /etc/yum.repos.d/fedora.repo",
+		#	"/usr/bin/wget 'http://${router_ip}:${http_port_str}/fedora/${repouid}/updates.repo' -O /etc/yum.repos.d/updates.repo",
+		#	"/usr/bin/dnf --enablerepo=fedora,updates install --assumeyes ${handoff_packages_string}",
+		#],
 		post => [
-			"/usr/bin/wget --post-data 'done=true&password=sha1TODO' -O - 'http://${router_ip}:${http_port_str}/action/done/mac=${provision_key}'",
+			$handoff_binary, # copy over the binary
+			$handoff_cpcode, # copy over a bundle of code
+			$handoff_service, # install a service for mgmt
+			$handoff_firstboot, # install firstboot service
+			$handoff_deploy, # install a firstboot script to deploy
+			$provisioning_done, # send a done signal back here
 		],
 	}
 
 	$kickstart_file = "${kickstart_http_prefix}${hkey}.ks"
 	file "${kickstart_file}" {
 		state => $const.res.file.state.exists,
-		content => template(deploy.readfile("/files/kickstart.ks.tmpl"), $http_kickstart_template),
+		content => golang.template(deploy.readfile("/files/kickstart.ks.tmpl"), $http_kickstart_template),
 	}
 
 	http:file "/fedora/kickstart/${hkey}.ks" { # usually $mac or `default`
-		#data => template(deploy.readfile("/files/kickstart.ks.tmpl"), $http_kickstart_template),
+		#data => golang.template(deploy.readfile("/files/kickstart.ks.tmpl"), $http_kickstart_template),
 		path => $kickstart_file,
 
 		Before => Print["ready"],

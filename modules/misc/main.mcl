@@ -1,0 +1,147 @@
+# Mgmt
+# Copyright (C) 2013-2024+ James Shubin and the project contributors
+# Written by James Shubin <james@shubin.ca> and the project contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# Additional permission under GNU GPL version 3 section 7
+#
+# If you modify this program, or any covered work, by linking or combining it
+# with embedded mcl code and modules (and that the embedded mcl code and
+# modules which link with this program, contain a copy of their source code in
+# the authoritative form) containing parts covered by the terms of any other
+# license, the licensors of this program grant you additional permission to
+# convey the resulting work. Furthermore, the licensors of this program grant
+# the original author, James Shubin, additional permission to update this
+# additional permission if he deems it necessary to achieve the goals of this
+# additional permission.
+
+import "golang"
+import "net"
+import "os"
+
+# ssh_keygen creates an ssh key pair in the user's home directory if the private
+# key doesn't exist.
+# TODO: add more parameters such as key size and type in the future
+class ssh_keygen($user) {
+	panic($user == "") # panic if $user is empty
+	$p = os.expand_home("~${user}/") # eg: ~james/
+	exec "ssh-keygen-${user}" {
+		cmd => "/usr/bin/ssh-keygen",
+		args => [
+		        "-t", "rsa", # type
+		        "-f", "${p}.ssh/id_rsa", # private key file
+		        "-N", "", # empty password
+		],
+		creates => "${p}.ssh/id_rsa",
+		user => $user,
+
+		Before => File["${p}.ssh/id_rsa"],
+	}
+	# This also serves as a "handle" so that other resources can depend on
+	# this file getting created before they run.
+	file "${p}.ssh/" {
+		state => "exists",
+		mode => "u=rwx,go=",
+		owner => $user,
+	}
+	file "${p}.ssh/id_rsa" {
+		mode => "u=rw,go=",
+		owner => $user,
+	}
+}
+
+# network_rename takes the device with the $mac address and renames it to $dev.
+class network_rename($mac, $dev) {
+	#panic(not net.is_mac("${mac}"))
+
+	file "/etc/systemd/network/70-rename-${dev}.link" {
+		state => "exists",
+		content => "
+# Pick the device name based on the mac address.
+[Match]
+MACAddress=${mac}
+
+[Link]
+Name=${dev}
+",
+		mode => "u=rw,go=r",
+		owner => "root",
+		group => "root",
+
+		Notify => Exec["udevadm trigger"],
+	}
+
+	# TODO: we only want to run this once, but it's harmless for now
+	exec "udevadm trigger" {
+		cmd => "/usr/sbin/udevadm trigger --type=all --action=add --prioritized-subsystem=net --settle",
+	}
+}
+
+# network_manager_static sets up a static ip address with network manager.
+# NOTE: To see what it's using run: `nmcli -f name,uuid,filename connection`.
+class network_manager_static($st) {
+	$uuid = $st->uuid || "" # 01234567-89ab-cdef-0123-456789abcdef
+	$mac = $st->mac || ""
+	$dev = $st->dev || "eth0"
+	$cidr = $st->cidr # cidr
+	$ip = net.cidr_to_ip($cidr)
+	$prefix = net.cidr_to_prefix($cidr)
+	$router = $st->router || ""
+	$dns = $st->dns || "8.8.8.8"
+
+	$tmpl =
+"
+[connection]
+id=${dev}
+{{ if .uuid -}}
+uuid=${uuid}
+{{ end -}}
+type=ethernet
+interface-name=${dev}
+autoconnect=true
+
+[ipv4]
+{{ if .router -}}
+address1=${ip}/${prefix},${router}
+{{ else -}}
+address1=${ip}/${prefix}
+{{ end -}}
+dns=${dns};
+dns-search=
+may-fail=false
+method=manual
+
+[ethernet]
+{{ if .mac -}}
+mac-address=${mac}
+{{ end -}}
+"
+
+	$args = struct{
+		uuid => $uuid,
+	}
+
+	file "/etc/NetworkManager/system-connections/${dev}.nmconnection" {
+		state => "exists",
+		content => golang.template($tmpl, $args),
+		mode => "u=rw,go=",
+		owner => "root",
+
+		Notify => Svc["NetworkManager"],
+	}
+
+	svc "NetworkManager" {
+	}
+}

@@ -894,6 +894,10 @@ func (obj *DHCPServerRes) handler4() func(net.PacketConn, net.Addr, *dhcpv4.DHCP
 			tmp.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeOffer))
 		case dhcpv4.MessageTypeRequest:
 			tmp.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeAck))
+		case dhcpv4.MessageTypeDecline:
+			// If mask is not set, some DHCP clients will DECLINE.
+			obj.init.Logf("handler4: Unhandled decline message: %+v", req)
+			return
 		default:
 			obj.init.Logf("handler4: Unhandled message type: %v", mt)
 			return
@@ -979,6 +983,7 @@ func (obj *DHCPServerRes) handler4() func(net.PacketConn, net.Addr, *dhcpv4.DHCP
 
 		if resp != nil {
 			if obj.init.Debug {
+				// NOTE: This is very useful for debugging!
 				obj.init.Logf("sending a DHCPv4 packet: %s", resp.Summary())
 			}
 			var peer net.Addr
@@ -1251,7 +1256,7 @@ func (obj *DHCPHostRes) handler4(data *HostData) (func(*dhcpv4.DHCPv4, *dhcpv4.D
 		// XXX: https://tools.ietf.org/html/rfc2132#section-3.3
 		// If both the subnet mask and the router option are specified
 		// in a DHCP reply, the subnet mask option MUST be first.
-		// XXX: Should we do this? Does it matter? Does the lib do it?
+		// If mask is not set, some DHCP clients will DECLINE.
 		resp.Options.Update(dhcpv4.OptSubnetMask(obj.ipv4Mask)) // net.IPMask
 
 		// nbp section
@@ -1714,7 +1719,7 @@ func (obj *DHCPRangeRes) Init(init *engine.Init) error {
 
 	obj.init.Logf("from: %s", obj.from)
 	obj.init.Logf("  to: %s", obj.to)
-	obj.init.Logf("mask: %s", obj.mask) // TODO: print as cidr or dotted quad
+	obj.init.Logf("mask: %s", netmaskAsQuadString(obj.mask))
 
 	return nil
 }
@@ -1932,8 +1937,8 @@ func (obj *DHCPRangeRes) handler4(data *HostData) (func(*dhcpv4.DHCPv4, *dhcpv4.
 		// XXX: https://tools.ietf.org/html/rfc2132#section-3.3
 		// If both the subnet mask and the router option are specified
 		// in a DHCP reply, the subnet mask option MUST be first.
-		// XXX: Should we do this? Does it matter? Does the lib do it?
-		//resp.Options.Update(dhcpv4.OptSubnetMask(obj.mask)) // net.IPMask
+		// If mask is not set, some DHCP clients will DECLINE.
+		resp.Options.Update(dhcpv4.OptSubnetMask(obj.mask)) // net.IPMask
 
 		// nbp section
 		if obj.opt66 != nil && req.IsOptionRequested(dhcpv4.OptionTFTPServerName) {
@@ -2048,4 +2053,10 @@ func checkValidNetmask(netmask net.IPMask) bool {
 	x := ^netmaskInt
 	y := x + 1
 	return (y & x) == 0
+}
+
+// netmaskAsQuadString returns a dotted-quad string giving you something like:
+// 255.255.255.0 instead of ffffff00 which is what's seen when you print it now.
+func netmaskAsQuadString(netmask net.IPMask) string {
+	return fmt.Sprintf("%d.%d.%d.%d", netmask[0], netmask[1], netmask[2], netmask[3])
 }

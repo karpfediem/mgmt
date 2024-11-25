@@ -43,8 +43,10 @@ import (
 	_ "github.com/purpleidea/mgmt/lang/core/example"
 	_ "github.com/purpleidea/mgmt/lang/core/example/nested"
 	_ "github.com/purpleidea/mgmt/lang/core/fmt"
+	_ "github.com/purpleidea/mgmt/lang/core/golang"
 	_ "github.com/purpleidea/mgmt/lang/core/iter"
 	_ "github.com/purpleidea/mgmt/lang/core/list"
+	_ "github.com/purpleidea/mgmt/lang/core/local"
 	_ "github.com/purpleidea/mgmt/lang/core/map"
 	_ "github.com/purpleidea/mgmt/lang/core/math"
 	_ "github.com/purpleidea/mgmt/lang/core/net"
@@ -53,6 +55,7 @@ import (
 	_ "github.com/purpleidea/mgmt/lang/core/strings"
 	_ "github.com/purpleidea/mgmt/lang/core/sys"
 	_ "github.com/purpleidea/mgmt/lang/core/test"
+	_ "github.com/purpleidea/mgmt/lang/core/util"
 	_ "github.com/purpleidea/mgmt/lang/core/value"
 	_ "github.com/purpleidea/mgmt/lang/core/world"
 )

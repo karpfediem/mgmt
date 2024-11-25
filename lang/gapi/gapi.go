@@ -189,7 +189,8 @@ func (obj *GAPI) Cli(info *gapi.Info) (*gapi.Deploy, error) {
 	}
 	importGraph.AddVertex(importVertex)
 
-	logf("init...")
+	//logf("init...")
+	logf("import: %s", output.Base)
 	// init and validate the structure of the AST
 	data := &interfaces.Data{
 		// TODO: add missing fields here if/when needed
@@ -219,7 +220,9 @@ func (obj *GAPI) Cli(info *gapi.Info) (*gapi.Deploy, error) {
 		return nil, errwrap.Wrapf(err, "could not init and validate AST")
 	}
 
-	logf("interpolating...")
+	if debug {
+		logf("interpolating...")
+	}
 	// interpolate strings and other expansionable nodes in AST
 	iast, err := xast.Interpolate()
 	if err != nil {
@@ -249,7 +252,9 @@ func (obj *GAPI) Cli(info *gapi.Info) (*gapi.Deploy, error) {
 		Functions: ast.FuncPrefixToFunctionsScope(""), // runs funcs.LookupPrefix
 	}
 
-	logf("scope building...")
+	if debug {
+		logf("scope building...")
+	}
 	// propagate the scope down through the AST...
 	// We use SetScope because it follows all of the imports through. I did
 	// not think we needed to pass in an initial scope because the download
@@ -338,12 +343,8 @@ func (obj *GAPI) Cli(info *gapi.Info) (*gapi.Deploy, error) {
 		}
 	}
 
-	// TODO: do we still need this, now that we have the Imports DAG?
-	noDuplicates := util.StrRemoveDuplicatesInList(files)
-	if len(noDuplicates) != len(files) {
-		// programming error here or in this logical test
-		return nil, fmt.Errorf("duplicates in file list found")
-	}
+	// There are duplicates if in our dag we use the same import twice.
+	files = util.StrRemoveDuplicatesInList(files)
 
 	// Add any missing dirs, so that we don't need to use `MkdirAll`...
 	// FIXME: It's possible that the dirs get generated upstream, but it's
@@ -379,10 +380,50 @@ func (obj *GAPI) Cli(info *gapi.Info) (*gapi.Deploy, error) {
 		//}
 		//logf("tree:\n%s", tree)
 
-		dst, err := util.Rebase(src, output.Base, "/")
+		// XXX: Should we have output.Base and output.ModulesBase?
+		// XXX: Maybe we should rebase to whichever the src starts with?
+		//commonBase := util.CommonPathPrefix(src, output.Base)
+		//logf("src:\n%s", src)
+		//logf("base:\n%s", output.Base)
+		//logf("common:\n%s", commonBase)
+		commonBase := output.Base // old method!
+		// NOTE: Instead of commonBase, we used to use output.Base here,
+		// but it seems this breaks if the modules path is not inside
+		// the normal code base. Such as if the src is:
+		// /etc/mgmt/modules/github.com/purpleidea/mgmt/modules/misc/main.mcl
+		// and the base is: /etc/mgmt/main/ if we run the mgmt binary
+		// with: mgmt run lang --module-path '/etc/mgmt/modules/' /etc/mgmt/main/
+		// for example.
+		// NOTE: We could possibly always rebase onto "/", but we'd like
+		// to eliminate the local path structure from our deploys for a
+		// weak kind of privacy of that users directory structure.
+		dst, err := util.Rebase(src, commonBase, "/")
 		if err != nil {
-			// possible programming error
-			return nil, errwrap.Wrapf(err, "malformed source file path: `%s`", src)
+			if modules == "" || !strings.HasPrefix(src, modules) {
+				// possible programming error
+				logf("src:\n%s", src)
+				logf("base:\n%s", output.Base)
+				//logf("common:\n%s", commonBase)
+				return nil, errwrap.Wrapf(err, "malformed source file path: `%s`", src)
+			}
+			// HACK: maybe it's a module?
+			// If we have a different base path, it might be a
+			// module dir. Maybe this hack covers all scenarios.
+
+			// Remove the actual "modules/" dir from the end...
+			m, err := util.RemovePathSuffix(modules)
+			if err != nil {
+				return nil, errwrap.Wrapf(err, "malformed source module dir: `%s`", modules)
+			}
+
+			// ...so that we keep `/modules/` as the new module dir.
+			dst, err = util.Rebase(src, m, "/")
+			if err != nil {
+				// possible programming error
+				logf("src:\n%s", src)
+				logf("base:\n%s", m)
+				return nil, errwrap.Wrapf(err, "malformed source module path: `%s`", src)
+			}
 		}
 
 		if strings.HasSuffix(src, "/") { // it's a dir
@@ -507,6 +548,13 @@ func (obj *GAPI) LangClose() error {
 		return errwrap.Wrapf(err, "can't close the lang") // nil passthrough
 	}
 	return nil
+}
+
+// Info returns some data about the GAPI implementation.
+func (obj *GAPI) Info() *gapi.InfoResult {
+	return &gapi.InfoResult{
+		URI: obj.InputURI,
+	}
 }
 
 // Graph returns a current Graph.

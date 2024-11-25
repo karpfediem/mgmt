@@ -1087,6 +1087,9 @@ func (obj *StmtRes) metaparams(table map[interfaces.Func]types.Value, res engine
 		case "realize":
 			meta.Realize = v.Bool() // must not panic
 
+		case "dollar":
+			meta.Dollar = v.Bool() // must not panic
+
 		case "reverse":
 			if rm != nil {
 				rm.Disabled = !v.Bool() // must not panic
@@ -1149,6 +1152,9 @@ func (obj *StmtRes) metaparams(table map[interfaces.Func]types.Value, res engine
 			}
 			if val, exists := v.Struct()["realize"]; exists {
 				meta.Realize = val.Bool() // must not panic
+			}
+			if val, exists := v.Struct()["dollar"]; exists {
+				meta.Dollar = val.Bool() // must not panic
 			}
 			if val, exists := v.Struct()["reverse"]; exists && rm != nil {
 				rm.Disabled = !val.Bool() // must not panic
@@ -1757,6 +1763,7 @@ func (obj *StmtResMeta) Init(data *interfaces.Data) error {
 	case "sema":
 	case "rewatch":
 	case "realize":
+	case "dollar":
 	case "reverse":
 	case "autoedge":
 	case "autogroup":
@@ -1966,6 +1973,9 @@ func (obj *StmtResMeta) TypeCheck(kind string) ([]*interfaces.UnificationInvaria
 	case "realize":
 		typExpr = types.TypeBool
 
+	case "dollar":
+		typExpr = types.TypeBool
+
 	case "reverse":
 		// TODO: We might want more parameters about how to reverse.
 		typExpr = types.TypeBool
@@ -1982,7 +1992,7 @@ func (obj *StmtResMeta) TypeCheck(kind string) ([]*interfaces.UnificationInvaria
 		// FIXME: allow partial subsets of this struct, and in any order
 		// FIXME: we might need an updated unification engine to do this
 		wrap := func(reverse *types.Type) *types.Type {
-			return types.NewType(fmt.Sprintf("struct{noop bool; retry int; retryreset bool; delay int; poll int; limit float; burst int; reset bool; sema []str; rewatch bool; realize bool; reverse %s; autoedge bool; autogroup bool}", reverse.String()))
+			return types.NewType(fmt.Sprintf("struct{noop bool; retry int; retryreset bool; delay int; poll int; limit float; burst int; reset bool; sema []str; rewatch bool; realize bool; dollar bool; reverse %s; autoedge bool; autogroup bool}", reverse.String()))
 		}
 		// TODO: We might want more parameters about how to reverse.
 		typExpr = wrap(types.TypeBool)
@@ -3493,21 +3503,26 @@ func (obj *StmtProg) importSystemScope(name string) (*interfaces.Scope, error) {
 			obj.data.Logf("behold, the AST: %+v", ast)
 		}
 
-		obj.data.Logf("init...")
+		//obj.data.Logf("init...")
+		//obj.data.Logf("import: %s", ?) // TODO: add this for symmetry?
 		// init and validate the structure of the AST
 		// some of this might happen *after* interpolate in SetScope or later...
 		if err := ast.Init(obj.data); err != nil {
 			return nil, errwrap.Wrapf(err, "could not init and validate AST")
 		}
 
-		obj.data.Logf("interpolating...")
+		if obj.data.Debug {
+			obj.data.Logf("interpolating...")
+		}
 		// interpolate strings and other expansionable nodes in AST
 		interpolated, err := ast.Interpolate()
 		if err != nil {
 			return nil, errwrap.Wrapf(err, "could not interpolate AST from import `%s`", name)
 		}
 
-		obj.data.Logf("scope building...")
+		if obj.data.Debug {
+			obj.data.Logf("scope building...")
+		}
 		// propagate the scope down through the AST...
 		// most importantly, we ensure that the child imports will run!
 		// we pass in *our* parent scope, which will include the globals
@@ -3592,7 +3607,8 @@ func (obj *StmtProg) importScopeWithParsedInputs(input *inputs.ParsedInput, scop
 
 	// nested logger
 	logf := func(format string, v ...interface{}) {
-		obj.data.Logf("import: "+format, v...)
+		//obj.data.Logf("import: "+format, v...) // don't nest!
+		obj.data.Logf(format, v...)
 	}
 
 	// build new list of files
@@ -3613,7 +3629,8 @@ func (obj *StmtProg) importScopeWithParsedInputs(input *inputs.ParsedInput, scop
 		logf("behold, the AST: %+v", ast)
 	}
 
-	logf("init...")
+	//logf("init...")
+	logf("import: %s", input.Base)
 	// init and validate the structure of the AST
 	data := &interfaces.Data{
 		// TODO: add missing fields here if/when needed
@@ -3639,14 +3656,18 @@ func (obj *StmtProg) importScopeWithParsedInputs(input *inputs.ParsedInput, scop
 		return nil, errwrap.Wrapf(err, "could not init and validate AST")
 	}
 
-	logf("interpolating...")
+	if obj.data.Debug {
+		logf("interpolating...")
+	}
 	// interpolate strings and other expansionable nodes in AST
 	interpolated, err := ast.Interpolate()
 	if err != nil {
 		return nil, errwrap.Wrapf(err, "could not interpolate AST from import")
 	}
 
-	logf("scope building...")
+	if obj.data.Debug {
+		logf("scope building...")
+	}
 	// propagate the scope down through the AST...
 	// most importantly, we ensure that the child imports will run!
 	// we pass in *our* parent scope, which will include the globals
@@ -8289,9 +8310,8 @@ func (obj *ExprCall) getPartials(fn *ExprFunc) (*types.Type, []types.Value, erro
 
 	// build partial type and partial input values to aid in filtering...
 	mapped := make(map[string]*types.Type)
-	//argNames := []string{}
+	argNames := []string{}
 	//partialValues := []types.Value{}
-	argNames := make([]string, len(obj.Args))
 	partialValues := make([]types.Value, len(obj.Args))
 	for i, arg := range obj.Args {
 		name, err := argGen(i) // get the Nth arg name
@@ -8303,11 +8323,12 @@ func (obj *ExprCall) getPartials(fn *ExprFunc) (*types.Type, []types.Value, erro
 			return nil, nil, fmt.Errorf("can't get arg #%d for func `%s`", i, obj.Name)
 		}
 		//mapped[name] = nil // unknown type
-		//argNames = append(argNames, name)
+		argNames = append(argNames, name)
 		//partialValues = append(partialValues, nil) // placeholder value
 
 		// optimization: if type/value is already known, specify it now!
 		var err1, err2 error
+		// NOTE: This _can_ return unification variables now. Is it ok?
 		mapped[name], err1 = arg.Type()      // nil type on error
 		partialValues[i], err2 = arg.Value() // nil value on error
 		if err1 == nil && err2 == nil && mapped[name].Cmp(partialValues[i].Type()) != nil {
@@ -8475,6 +8496,10 @@ func (obj *ExprCall) Infer() (*types.Type, []*interfaces.UnificationInvariant, e
 				return nil, nil, errwrap.Wrapf(err, "func `%s` infer error", exprFunc.Title)
 			}
 			invariants = append(invariants, invars...)
+			if typ == nil { // should get a sig, not a nil!
+				// programming error
+				return nil, nil, fmt.Errorf("func `%s` infer type was nil", exprFunc.Title)
+			}
 
 			// It's important that we copy the type signature here.
 			// See the above comment which explains the reasoning.
