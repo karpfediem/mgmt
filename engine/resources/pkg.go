@@ -265,7 +265,9 @@ func (obj *PkgRes) populateFileList() error {
 	if err != nil {
 		return errwrap.Wrapf(err, "the pkgMappingHelper failed")
 	}
-
+	if bus.Debug {
+		bus.Logf("populateFileList() result: %+v", result)
+	}
 	data, ok := result[obj.Name()] // lookup single package (init does just one)
 	// package doesn't exist, this is an error!
 	if !ok || !data.Found {
