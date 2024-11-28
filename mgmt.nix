@@ -15,12 +15,7 @@ buildGoModule rec {
   pname = "mgmt";
   version = "0.0.26-master";
 
-  src = fetchFromGitHub {
-    owner = "purpleidea";
-    repo = pname;
-    rev = "380004b1dccb1c76c2d87c5473c4dc105c8a6319";
-    hash = "sha256-+LQaqCM2UUBLCkCCJ30KQTA1VYEyX6zym/dp415IIVA=";
-  };
+  src = ./.;
 
   # patching must be done in prebuild, so it is shared with goModules
   # see https://github.com/NixOS/nixpkgs/issues/208036
