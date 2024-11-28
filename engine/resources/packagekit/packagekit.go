@@ -752,6 +752,9 @@ func (obj *Conn) PackagesToPackageIDs(packageMap map[string]string, filter uint6
 		}
 
 		for i := range packages { // find pkg if it exists
+			if obj.Debug {
+				obj.Logf("PackagesToPackageIDs() pkg: %+v, packages[i]: %+v, i: %+v", pkg, packages[i], i)
+			}
 			if pkg == packages[i] {
 				index = i
 			}
