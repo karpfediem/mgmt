@@ -50,7 +50,7 @@ import (
 // These constants are some global variables that are used throughout the code.
 const (
 	tagline = "next generation config management"
-	debug   = false // add additional log messages
+	debug   = true // add additional log messages
 )
 
 // set at compile time
