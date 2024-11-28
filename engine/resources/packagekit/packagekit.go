@@ -751,6 +751,9 @@ func (obj *Conn) PackagesToPackageIDs(packageMap map[string]string, filter uint6
 			continue
 		}
 
+		if obj.Debug {
+			obj.Logf("PackagesToPackageIDs() packages: %+v", packages)
+		}
 		for i := range packages { // find pkg if it exists
 			if obj.Debug {
 				obj.Logf("PackagesToPackageIDs() pkg: %+v, packages[i]: %+v, i: %+v", pkg, packages[i], i)
@@ -763,6 +766,9 @@ func (obj *Conn) PackagesToPackageIDs(packageMap map[string]string, filter uint6
 			continue
 		}
 		state := packageMap[pkg] // lookup the requested state/version
+		if obj.Debug {
+			obj.Logf("PackagesToPackageIDs() state: %+v", state)
+		}
 		if state == "" {
 			return nil, fmt.Errorf("empty package state for: `%s`", pkg)
 		}
