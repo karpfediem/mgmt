@@ -269,6 +269,9 @@ func (obj *PkgRes) populateFileList() error {
 		bus.Logf("populateFileList() result: %+v", result)
 	}
 	data, ok := result[obj.Name()] // lookup single package (init does just one)
+	if bus.Debug {
+		bus.Logf("populateFileList() data: %+v", data)
+	}
 	// package doesn't exist, this is an error!
 	if !ok || !data.Found {
 		return fmt.Errorf("can't find package named '%s'", obj.Name())
