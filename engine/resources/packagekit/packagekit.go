@@ -739,6 +739,10 @@ func (obj *Conn) PackagesToPackageIDs(packageMap map[string]string, filter uint6
 		s := strings.Split(packageID, ";")
 		//if len(s) != 4 { continue } // this would be a bug!
 		pkg, ver, arch, data := s[0], s[1], s[2], s[3]
+
+		if obj.Debug {
+			obj.Logf("PackagesToPackageIDs() pkg: %+v, ver: %+v, arch: %+v, data: %+v", pkg, ver, arch, data)
+		}
 		// we might need to allow some of this, eg: i386 .deb on amd64
 		b, err := IsMyArch(arch)
 		if err != nil {
