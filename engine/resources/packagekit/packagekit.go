@@ -992,5 +992,6 @@ func IsMyArch(arch string) (bool, error) {
 	if goarch == archUtil.Any { // special value that corresponds to noarch
 		return true, nil
 	}
+	return false, fmt.Errorf("goarch '%s', GOARCH '%s'", goarch, runtime.GOARCH)
 	return goarch == runtime.GOARCH, nil
 }
