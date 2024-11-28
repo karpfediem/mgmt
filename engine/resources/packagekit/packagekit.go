@@ -350,6 +350,9 @@ loop:
 			}
 		}
 	}
+	if obj.Debug {
+		obj.Logf("ResolvePackages(): packageIDs: %+v", packageIDs)
+	}
 	return packageIDs, nil
 }
 
