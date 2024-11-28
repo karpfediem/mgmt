@@ -752,7 +752,7 @@ func (obj *Conn) PackagesToPackageIDs(packageMap map[string]string, filter uint6
 		if err != nil {
 			return nil, errwrap.Wrapf(err, "arch error")
 		} else if !b {
-			continue
+			//continue
 		}
 
 		if obj.Debug {
