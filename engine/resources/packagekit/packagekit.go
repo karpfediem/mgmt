@@ -745,6 +745,10 @@ func (obj *Conn) PackagesToPackageIDs(packageMap map[string]string, filter uint6
 		}
 		// we might need to allow some of this, eg: i386 .deb on amd64
 		b, err := IsMyArch(arch)
+
+		if obj.Debug {
+			obj.Logf("PackagesToPackageIDs() [IsMyArch] b: %+v, err: %+v", b, err)
+		}
 		if err != nil {
 			return nil, errwrap.Wrapf(err, "arch error")
 		} else if !b {
