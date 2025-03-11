@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/purpleidea/mgmt/lang/funcs/ref"
 	"github.com/purpleidea/mgmt/lang/interfaces"
@@ -47,7 +48,7 @@ const PostReverseCommit = false
 
 // GraphvizDebug enables writing graphviz graphs on each commit. This is very
 // slow.
-const GraphvizDebug = false
+const GraphvizDebug = true
 
 // opapi is the input for any op. This allows us to keeps things compact and it
 // also allows us to change API slightly without re-writing code.
@@ -511,23 +512,23 @@ func (obj *GraphTxn) commit() error {
 	// XXX: running this on each commit has a huge performance hit.
 	// XXX: we could write out the .dot files and run graphviz afterwards
 	if g, ok := obj.GraphAPI.(pgraph.Graphvizable); ok && GraphvizDebug {
-		//d := time.Now().Unix()
-		//if err := g.ExecGraphviz(fmt.Sprintf("/tmp/txn-graphviz-%d.dot", d)); err != nil {
-		//	panic("no graphviz")
-		//}
-		if err := g.ExecGraphviz(""); err != nil {
-			panic(err) // XXX: improve me
+		d := time.Now().Unix()
+		if err := g.ExecGraphviz(fmt.Sprintf("graphs/txn-graphviz-%d.dot", d)); err != nil {
+			panic("no graphviz")
 		}
+		//if err := g.ExecGraphviz(""); err != nil {
+		//	panic(err) // XXX: improve me
+		//}
 
-		//gv := &pgraph.Graphviz{
-		//	Filename: fmt.Sprintf("/tmp/txn-graphviz-%d.dot", d),
-		//	Graphs: map[*pgraph.Graph]*pgraph.GraphvizOpts{
-		//		obj.Graph(): nil,
-		//	},
-		//}
-		//if err := gv.Exec(); err != nil {
-		//	panic("no graphviz")
-		//}
+		gv := &pgraph.Graphviz{
+			Filename: fmt.Sprintf("graphs/txn-graphviz-%d.dot", d),
+			Graphs: map[*pgraph.Graph]*pgraph.GraphvizOpts{
+				obj.Graph(): nil,
+			},
+		}
+		if err := gv.Exec(); err != nil {
+			panic("no graphviz")
+		}
 	}
 	return nil
 }
