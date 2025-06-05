@@ -24,8 +24,7 @@ buildGoModule rec {
     patchShebangs misc/header.sh
   '';
   preBuild = ''
-    make -C engine/resources
-    make lang funcgen
+    make
   '';
 
   buildInputs = [
