@@ -148,14 +148,14 @@ type Config struct {
 	// this many seconds. Use 0 to disable this.
 	MaxRuntime uint `arg:"--max-runtime,env:MGMT_MAX_RUNTIME" help:"exit after a maximum of approximately this many seconds"`
 
-	// SshUrl can be specified if we want to transport the SSH client
+	// SSHURL can be specified if we want to transport the SSH client
 	// connection over SSH. If this is specified, the second hop is made
 	// with the Seeds values, but they connect from this destination. You
 	// can specify this in the standard james@server:22 format. This will
 	// use your ~/.ssh/ directory for public key authentication and
 	// verifying the host key in the known_hosts file. This must already be
 	// setup for things to work.
-	SshUrl string `arg:"--ssh-url" help:"transport the etcd client connection over SSH to this server"`
+	SSHURL string `arg:"--ssh-url" help:"transport the etcd client connection over SSH to this server"`
 
 	// Seeds are the list of default etcd client endpoints. If empty, it
 	// will startup a new server.
@@ -617,9 +617,9 @@ func (obj *Main) Run() error {
 			return gapiInfoResult.URI
 		},
 	}
-	if obj.SshUrl != "" { // alternate world implementation over SSH
+	if obj.SSHURL != "" { // alternate world implementation over SSH
 		world = &etcdSSH.World{
-			URL:            obj.SshUrl,
+			URL:            obj.SSHURL,
 			Seeds:          obj.Seeds,
 			NS:             NS,
 			MetadataPrefix: MetadataPrefix,
@@ -811,7 +811,7 @@ func (obj *Main) Run() error {
 			}
 			var timing time.Time
 
-			// make the graph from yaml, lib, puppet->yaml, or dsl!
+			// make the graph from yaml, lib, puppet->yaml, or mcl!
 			timing = time.Now()
 			newGraph, err := gapiImpl.Graph() // generate graph!
 			if err != nil {
@@ -972,6 +972,7 @@ func (obj *Main) Run() error {
 			Logf("send/recv building took: %s", time.Since(timing))
 
 			// Double check before we commit.
+			timing = time.Now()
 			if err := obj.ge.Apply(func(graph *pgraph.Graph) error {
 				_, e := graph.TopologicalSort() // am i a dag or not?
 				return e
@@ -980,6 +981,7 @@ func (obj *Main) Run() error {
 				Logf("error running the TopologicalSort: %+v", err)
 				continue
 			}
+			Logf("resource topological sort took: %s", time.Since(timing))
 
 			// TODO: do we want to do a transitive reduction?
 			// FIXME: run a type checker that verifies all the send->recv relationships
@@ -1011,6 +1013,22 @@ func (obj *Main) Run() error {
 				}
 				continue // stay paused
 			}
+
+			// XXX: Should we do this right before Commit?
+			// Don't obj.ge.Apply(...), that works on the old graph!
+			timing = time.Now()
+			//if !obj.ge.IsClosing() { // XXX: do we need to do this?
+			// skip prune when we're closing
+			//}
+			// FIXME: is this the right ctx?
+			if err := obj.ge.Exporter.Prune(exitCtx, obj.ge.Graph()); err != nil {
+				// XXX: This should just cause a permanent error
+				// here which turns into a shutdown. Refactor!
+				obj.ge.Abort() // delete graph
+				Logf("error running the exporter Prune: %+v", err)
+				continue
+			}
+			Logf("export cleanup took: %s", time.Since(timing))
 
 			// Start needs to be synchronous because we don't want
 			// to loop around and cause a pause before we unpaused.

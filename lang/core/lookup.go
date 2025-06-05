@@ -148,6 +148,9 @@ func (obj *LookupFunc) FuncInfer(partialType *types.Type, partialValues []types.
 // runs.
 func (obj *LookupFunc) Build(typ *types.Type) (*types.Type, error) {
 	// typ is the KindFunc signature we're trying to build...
+	if typ == nil {
+		return nil, fmt.Errorf("nil type") // happens b/c of Copy()
+	}
 	if typ.Kind != types.KindFunc {
 		return nil, fmt.Errorf("input type must be of kind func")
 	}
@@ -195,6 +198,20 @@ func (obj *LookupFunc) Build(typ *types.Type) (*types.Type, error) {
 	return obj.fn.Build(typ)
 }
 
+// Copy is implemented so that the type value is not lost if we copy this
+// function.
+func (obj *LookupFunc) Copy() interfaces.Func {
+	fn := &LookupFunc{
+		Type: obj.Type, // don't copy because we use this after unification
+
+		//init: obj.init, // likely gets overwritten anyways
+	}
+	if _, err := fn.Build(obj.Type); err != nil {
+		// ignore, since we just didn't set the type
+	}
+	return fn
+}
+
 // Validate tells us if the input struct takes a valid form.
 func (obj *LookupFunc) Validate() error {
 	if obj.fn == nil { // build must be run first
@@ -212,7 +229,9 @@ func (obj *LookupFunc) Info() *interfaces.Info {
 	if obj.fn == nil {
 		return &interfaces.Info{
 			Pure: true,
-			Memo: false,
+			Memo: true,
+			Fast: true,
+			Spec: true,
 			Sig:  types.NewType("func(?1, ?2) ?3"), // func kind
 			Err:  obj.Validate(),
 		}
@@ -239,6 +258,9 @@ func (obj *LookupFunc) Stream(ctx context.Context) error {
 
 // Call returns the result of this function.
 func (obj *LookupFunc) Call(ctx context.Context, args []types.Value) (types.Value, error) {
+	if obj.fn == nil {
+		return nil, funcs.ErrCantSpeculate
+	}
 	cf, ok := obj.fn.(interfaces.CallableFunc)
 	if !ok {
 		// programming error

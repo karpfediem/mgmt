@@ -104,6 +104,7 @@ func init() {
 %token CLASS_IDENTIFIER INCLUDE_IDENTIFIER
 %token IMPORT_IDENTIFIER AS_IDENTIFIER
 %token COMMENT ERROR
+%token COLLECT_IDENTIFIER
 %token PANIC_IDENTIFIER
 
 // precedence table
@@ -188,6 +189,11 @@ stmt:
 		$$.stmt = $1.stmt
 		locate(yylex, $1, yyDollar[len(yyDollar)-1], $$.stmt)
 	}
+|	collect
+	{
+		$$.stmt = $1.stmt
+		locate(yylex, $1, yyDollar[len(yyDollar)-1], $$.stmt)
+	}
 |	resource
 	{
 		$$.stmt = $1.stmt
@@ -249,9 +255,10 @@ stmt:
 		$$.stmt = &ast.StmtFunc{
 			Name: $2.str,
 			Func: &ast.ExprFunc{
-				Args: $4.args,
-				//Return: nil,
-				Body: $7.expr,
+				Title:  $2.str,
+				Args:   $4.args,
+				Return: nil,
+				Body:   $7.expr,
 			},
 		}
 		locate(yylex, $1, yyDollar[len(yyDollar)-1], $$.stmt)
@@ -260,6 +267,7 @@ stmt:
 |	FUNC_IDENTIFIER IDENTIFIER OPEN_PAREN args CLOSE_PAREN type OPEN_CURLY expr CLOSE_CURLY
 	{
 		fn := &ast.ExprFunc{
+			Title:  $2.str,
 			Args:   $4.args,
 			Return: $6.typ, // return type is known
 			Body:   $8.expr,
@@ -1026,6 +1034,46 @@ panic:
 		locate(yylex, $1, yyDollar[len(yyDollar)-1], $$.stmt)
 	}
 ;
+collect:
+	// `collect file "/tmp/hello" { ... }`
+	// `collect file ["/tmp/hello", ...,] { ... }`
+	// `collect file [struct{name => "/tmp/hello", host => "foo",}, ...,] { ... }`
+	COLLECT_IDENTIFIER resource
+	{
+		// A "collect" stmt is exactly a regular "res" statement, except
+		// it has the boolean "Collect" field set to true, and it also
+		// has a special "resource body" entry which accepts the special
+		// collected data from the function graph.
+		$$.stmt = $2.stmt // it's us now
+		kind := $2.stmt.(*ast.StmtRes).Kind
+		res := $$.stmt.(*ast.StmtRes)
+		res.Collect = true
+		// We are secretly adding a special field to the res contents,
+		// which receives all of the exported data so that we have it
+		// arrive in our function graph in the standard way. We'd need
+		// to have this data to be able to build the resources we want!
+		call := &ast.ExprCall{
+			// function name to lookup special values from that kind
+			Name: funcs.CollectFuncName,
+			Args: []interfaces.Expr{
+				&ast.ExprStr{      // magic operator first
+					V: kind,   // tell it what we're reading
+				},
+				// names to collect
+				// XXX: Can we copy the same AST nodes to here?
+				// XXX: Do I need to run .Copy() on them ?
+				// str, []str, or []struct{name str; host str}
+				res.Name, // expr (hopefully one of those types)
+			},
+		}
+		collect := &ast.StmtResCollect{ // special field
+			Kind:  kind, // might as well tell it directly
+			Value: call,
+		}
+		res.Contents = append(res.Contents, collect)
+		locate(yylex, $1, yyDollar[len(yyDollar)-1], $$.stmt)
+	}
+;
 /* TODO: do we want to include this?
 // resource bind
 rbind:
@@ -1441,6 +1489,12 @@ undotted_identifier:
 	}
 	// a function could be named map()!
 |	MAP_IDENTIFIER
+	{
+		posLast(yylex, yyDollar) // our pos
+		$$.str = $1.str
+	}
+	// a function could be named collect.res()!
+|	COLLECT_IDENTIFIER
 	{
 		posLast(yylex, yyDollar) // our pos
 		$$.str = $1.str

@@ -86,7 +86,9 @@ type Stmt interface {
 	TypeCheck() ([]*UnificationInvariant, error)
 
 	// Graph returns the reactive function graph expressed by this node. It
-	// takes in the environment of any functions in scope.
+	// takes in the environment of any functions in scope. Intended to be
+	// called only once, creates and returns the graph and also stores it to
+	// be used in .Output if needed.
 	Graph(env *Env) (*pgraph.Graph, error)
 
 	// Output returns the output that this "program" produces. This output
@@ -298,7 +300,7 @@ type Scope struct {
 }
 
 // EmptyScope returns the zero, empty value for the scope, with all the internal
-// lists initialized appropriately.
+// maps and lists initialized appropriately.
 func EmptyScope() *Scope {
 	return &Scope{
 		Variables: make(map[string]Expr),
@@ -434,8 +436,8 @@ type Env struct {
 	Functions map[Expr]*Env
 }
 
-// EmptyEnv returns the zero, empty value for the scope, with all the internal
-// lists initialized appropriately.
+// EmptyEnv returns the zero, empty value for the env, with all the internal
+// maps initialized appropriately.
 func EmptyEnv() *Env {
 	return &Env{
 		Variables: make(map[Expr]*FuncSingleton),
@@ -504,6 +506,41 @@ func (obj *FuncSingleton) GraphFunc() (*pgraph.Graph, Func, error) {
 		return nil, nil, fmt.Errorf("unexpected nil function")
 	}
 	return obj.g, obj.f, nil
+}
+
+// ValueEnv is a future potential argument to the Value() method on Expr.
+// XXX: Consider using this if we want to improve graph shape even more.
+type ValueEnv struct {
+	Variables map[Expr]types.Value
+}
+
+// EmptyValueEnv returns the zero, empty value for the value env, with all the
+// internal maps initialized appropriately.
+func EmptyValueEnv() *ValueEnv {
+	return &ValueEnv{
+		Variables: make(map[Expr]types.Value),
+	}
+}
+
+// Copy makes a copy of the ValueEnv struct. This ensures that if the internal
+// maps are changed, it doesn't affect other copies of the ValueEnv. It does
+// *not* copy or change the pointers contained within, since these are
+// references, and we need those to be consistently pointing to the same things
+// after copying.
+func (obj *ValueEnv) Copy() *ValueEnv {
+	if obj == nil { // allow copying nil envs
+		return EmptyValueEnv()
+	}
+
+	variables := make(map[Expr]types.Value)
+
+	for k, v := range obj.Variables { // copy
+		variables[k] = v // we don't copy the values!
+	}
+
+	return &ValueEnv{
+		Variables: variables,
+	}
 }
 
 // Arg represents a name identifier for a func or class argument declaration and

@@ -64,8 +64,10 @@ func (obj *FactFunc) Validate() error {
 // Info returns some static info about itself.
 func (obj *FactFunc) Info() *interfaces.Info {
 	return &interfaces.Info{
-		Pure: false,
-		Memo: false,
+		Pure: obj.Fact.Info().Pure,
+		Memo: obj.Fact.Info().Memo,
+		Fast: obj.Fact.Info().Fast,
+		Spec: obj.Fact.Info().Spec,
 		Sig: &types.Type{
 			Kind: types.KindFunc,
 			// if Ord or Map are nil, this will panic things!
@@ -97,5 +99,12 @@ func (obj *FactFunc) Stream(ctx context.Context) error {
 
 // Call this fact and return the value if it is possible to do so at this time.
 func (obj *FactFunc) Call(ctx context.Context, _ []types.Value) (types.Value, error) {
-	return obj.Fact.Call(ctx)
+	//return obj.Fact.Call(ctx)
+
+	callableFact, ok := obj.Fact.(CallableFact)
+	if !ok {
+		return nil, fmt.Errorf("fact is not a CallableFact")
+	}
+
+	return callableFact.Call(ctx)
 }
