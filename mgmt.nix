@@ -24,6 +24,7 @@ buildGoModule rec {
     patchShebangs misc/header.sh
   '';
   preBuild = ''
+    make -C engine/resources
     make lang funcgen
   '';
 
@@ -50,7 +51,7 @@ buildGoModule rec {
 
   subPackages = [ "." ];
 
-  vendorHash = "sha256-VRMf9b8OSAsjm5xNz5s0hMpiphBctPKMZcFT/Rzonto=";
+  vendorHash = "sha256-Po+ETGWvx+G9tzH69jgmhFSjO9NdQoe4z23Rd0o+HAw=";
 
   meta = with lib; {
     description = "Next generation distributed, event-driven, parallel config management!";
