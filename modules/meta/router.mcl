@@ -38,10 +38,12 @@ class router($st) {
 	$net_dev = $st->net_dev || "eth0"
 	$net_mac = $st->net_mac
 
+	#$net_uuid = $st->net_uuid || "" # 01234567-89ab-cdef-0123-456789abcdef
+
 	$loc_dev = $st->loc_dev || ""
 	$loc_mac = $st->loc_mac || ""
 
-	$loc_uuid = $st->loc_uuid || "" # 01234567-89ab-cdef-0123-456789abcdef
+	#$loc_uuid = $st->loc_uuid || "" # 01234567-89ab-cdef-0123-456789abcdef
 	$loc_network = $st->loc_network # cidr
 
 	$loc_ip = $st->loc_ip || net.cidr_to_first($loc_network) # no cidr
@@ -50,19 +52,42 @@ class router($st) {
 	$loc_range = $st->loc_range || struct{start => "", end => "",} # struct with start, end fields
 	$dns = $st->dns
 
+	svc "NetworkManager" {
+		state => "stopped",
+		startup => "disabled",
+	}
+
 	include misc.network_rename($net_mac, $net_dev)
 	if $loc_dev != "" and $loc_mac != "" {
 		include misc.network_rename($loc_mac, $loc_dev)
 	}
 
-	if $loc_dev != "" {
-		$prefix = net.cidr_to_prefix($loc_network)
-		include misc.network_manager_static(struct{
-			uuid => $loc_uuid,
-			dev => $loc_dev, # formerly enp0s2
-			cidr => "${loc_ip}/${prefix}",
+	if $net_dev != "" {
+		# XXX: should we specify DNS here?
+		include misc.networkd_dhcp($net_dev, struct{
 			dns => $dns,
 		})
+		#include misc.network_manager_dhcp(struct{
+		#	uuid => $net_uuid,
+		#	dev => $net_dev,
+		#	mac => $net_mac,
+		#	dns => $dns,
+		#})
+	}
+
+	if $loc_dev != "" {
+		$prefix = net.cidr_to_prefix($loc_network)
+		include misc.networkd_static($net_dev, struct{
+			cidr => "${loc_ip}/${prefix}",
+			#dns => $dns,
+		})
+		#include misc.network_manager_static(struct{
+		#	uuid => $loc_uuid,
+		#	dev => $loc_dev, # formerly enp0s2
+		#	mac => $loc_mac,
+		#	cidr => "${loc_ip}/${prefix}",
+		#	dns => $dns,
+		#})
 	}
 
 	include purpleidea.base() # adds some utility packages
@@ -148,7 +173,6 @@ class router($st) {
 		action => "MASQUERADE",
 		source => ["${loc_network}",], # ip/cidr of the LOC network, eg: 192.168.100.0/24
 		dest => "NET_IF",
-		log => true,
 	})
 
 	include firewall.stoppedrule("loc-all", struct{
@@ -162,7 +186,15 @@ class router($st) {
 		dest => "LOC_IF",
 	})
 
-	include firewall.rule("ssh-from-loc-to-fw", struct{
+	include firewall.rule("000-invalid-net-all-tcp", struct{
+		action => "Invalid(DROP)",
+		source => "net",
+		dest => "all",
+		proto => "tcp",
+		comment => "Don't allow connection pickup from the net",
+	})
+
+	include firewall.rule("111-accept-ssh-loc-fw", struct{
 		action => "SSH(ACCEPT)",
 		source => "loc",
 		dest => "$FW",
@@ -171,13 +203,33 @@ class router($st) {
 		comment => "local administration",
 	})
 
-	include firewall.rule("ssh-from-net-to-fw", struct{
+	include firewall.rule("111-accept-ssh-net-fw", struct{
 		action => "SSH(ACCEPT)",
 		source => "net",
 		dest => "$FW",
 		#proto => "",
 		#port => "",
 		comment => "remote administration",
+	})
+
+	include firewall.rule("997-drop-ping-net-fw", struct{
+		action => "Ping(DROP)",
+		source => "net",
+		dest => "$FW",
+		comment => "Drop Ping from the \"bad\" net zone and prevent your log from being flooded.",
+	})
+
+	include firewall.rule("998-accept-icmp-fw-loc", struct{
+		action => "ACCEPT",
+		source => "$FW",
+		dest => "loc",
+		proto => "icmp",
+	})
+	include firewall.rule("999-accept-icmp-fw-net", struct{
+		action => "ACCEPT",
+		source => "$FW",
+		dest => "net",
+		proto => "icmp",
 	})
 }
 

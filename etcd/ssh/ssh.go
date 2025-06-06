@@ -143,8 +143,8 @@ func (obj *World) hostKeyCallback() (ssh.HostKeyCallback, error) {
 	return knownhosts.New(p)
 }
 
-// Init runs first.
-func (obj *World) Init(init *engine.WorldInit) error {
+// Connect runs first.
+func (obj *World) Connect(ctx context.Context, init *engine.WorldInit) error {
 	obj.init = init
 	obj.cleanups = []func() error{}
 
@@ -218,9 +218,10 @@ func (obj *World) Init(init *engine.WorldInit) error {
 		}
 		auth, err := obj.sshKeyAuth(p)
 		if err != nil {
-			obj.init.Logf("can't get auth from: %s", p)
+			//obj.init.Logf("can't get auth from: %s", p) // misleading
 			continue
 		}
+		obj.init.Logf("found auth option in: %s", p)
 		auths = append(auths, auth)
 	}
 	if len(auths) == 0 {
@@ -241,7 +242,7 @@ func (obj *World) Init(init *engine.WorldInit) error {
 	}
 
 	obj.init.Logf("ssh: %s@%s", user, addr)
-	obj.sshClient, err = ssh.Dial("tcp", addr, sshConfig)
+	obj.sshClient, err = dialSSHWithContext(ctx, "tcp", addr, sshConfig)
 	if err != nil {
 		return err
 	}
@@ -253,40 +254,47 @@ func (obj *World) Init(init *engine.WorldInit) error {
 		return e
 	})
 
-	tunnels := make(map[string]net.Conn)
-	for _, seed := range obj.Seeds {
-		addr := seedSSH[seed]
-		obj.init.Logf("tunnel: %s", addr)
-		tunnel, err := obj.sshClient.Dial("tcp", addr)
-		if err != nil {
-			return errwrap.Append(obj.cleanup(), err)
+	// This runs repeatedly when etcd tries to reconnect.
+	grpcWithContextDialerFunc := func(ctx context.Context, addr string) (net.Conn, error) {
+		var reterr error
+		for _, seed := range obj.Seeds { // first successful connect wins
+			if addr != seedSSH[seed] {
+				continue // not what we're expecting
+			}
+			obj.init.Logf("tunnel: %s", addr)
+
+			tunnel, err := obj.sshClient.Dial("tcp", addr)
+			if err != nil {
+				reterr = err
+				obj.init.Logf("ssh dial error: %v", err)
+				continue
+			}
+
+			// TODO: do we need a mutex around adding these?
+			obj.cleanups = append(obj.cleanups, func() error {
+				e := tunnel.Close()
+				if e == io.EOF { // XXX: why does this happen?
+					return nil // ignore
+				}
+				if obj.init.Debug && e != nil {
+					obj.init.Logf("ssh client close error: %+v", e)
+				}
+				return e
+			})
+
+			return tunnel, nil // connected successfully
 		}
-		obj.cleanups = append(obj.cleanups, func() error {
-			e := tunnel.Close()
-			if e == io.EOF { // XXX: why does this happen?
-				return nil // ignore
-			}
-			if obj.init.Debug && e != nil {
-				obj.init.Logf("ssh client close error: %+v", e)
-			}
-			return e
-		})
-		tunnels[addr] = tunnel
+
+		if reterr != nil {
+			return nil, reterr
+		}
+		return nil, fmt.Errorf("no ssh tunnels available") // TODO: better error message?
 	}
 
 	etcdClient, err := clientv3.New(clientv3.Config{
 		Endpoints: obj.Seeds,
 		DialOptions: []grpc.DialOption{
-			grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-				tunnel, exists := tunnels[addr]
-				if !exists {
-					obj.init.Logf("can't find tunnel: %s", addr) // tell user early...
-					return nil, fmt.Errorf("can't find tunnel: %s", addr)
-				}
-				// TODO: print the scheme here on this log msg
-				obj.init.Logf("etcd dial: %s", addr)
-				return tunnel, nil
-			}),
+			grpc.WithContextDialer(grpcWithContextDialerFunc),
 		},
 	})
 	if err != nil {
@@ -310,11 +318,11 @@ func (obj *World) Init(init *engine.WorldInit) error {
 		StandaloneFs:   obj.StandaloneFs,
 		GetURI:         obj.GetURI,
 	}
-	if err := obj.World.Init(init); err != nil {
+	if err := obj.World.Connect(ctx, init); err != nil {
 		return errwrap.Append(obj.cleanup(), err)
 	}
 	obj.cleanups = append(obj.cleanups, func() error {
-		e := obj.World.Close()
+		e := obj.World.Cleanup()
 		if obj.init.Debug && e != nil {
 			obj.init.Logf("world close error: %+v", e)
 		}
@@ -337,7 +345,24 @@ func (obj *World) cleanup() error {
 	return errs
 }
 
-// Close runs last.
-func (obj *World) Close() error {
+// CLeanup runs last.
+func (obj *World) Cleanup() error {
 	return obj.cleanup()
+}
+
+// dialSSHWithContext wraps ssh.Dial so that we can have a context to cancel.
+func dialSSHWithContext(ctx context.Context, network, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return ssh.NewClient(c, chans, reqs), nil
 }

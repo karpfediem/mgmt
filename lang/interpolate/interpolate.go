@@ -55,24 +55,37 @@ const (
 	UseOptimizedConcat = true
 )
 
-// StrInterpolate interpolates a string and returns the representative AST.
-func StrInterpolate(str string, pos *interfaces.Pos, data *interfaces.Data) (interfaces.Expr, error) {
+// StrInterpolate interpolates a string and returns the representative AST. If
+// there was nothing to interpolate, this returns (nil, nil).
+func StrInterpolate(str string, textarea *interfaces.Textarea, data *interfaces.Data) (interfaces.Expr, error) {
 	if data.Debug {
 		data.Logf("interpolating: %s", str)
 	}
 
 	if UseHilInterpolation {
-		return HilInterpolate(str, pos, data)
+		return HilInterpolate(str, textarea, data)
 	}
-	return RagelInterpolate(str, pos, data)
+	return RagelInterpolate(str, textarea, data)
 }
 
 // RagelInterpolate interpolates a string and returns the representative AST. It
-// uses the ragel parser to perform the string interpolation.
-func RagelInterpolate(str string, pos *interfaces.Pos, data *interfaces.Data) (interfaces.Expr, error) {
+// uses the ragel parser to perform the string interpolation. If there was
+// nothing to interpolate, this returns (nil, nil).
+func RagelInterpolate(str string, textarea *interfaces.Textarea, data *interfaces.Data) (interfaces.Expr, error) {
 	sequence, err := Parse(str)
 	if err != nil {
 		return nil, errwrap.Wrapf(err, "parser failed")
+	}
+
+	// If we didn't find anything of value, we got an empty string...
+	if len(sequence) == 0 && str == "" { // be doubly sure...
+		return nil, nil // pass through, nothing changed
+	}
+
+	if len(sequence) == 1 {
+		if x, ok := sequence[0].(Literal); ok && x.Value == str {
+			return nil, nil // pass through, nothing changed
+		}
 	}
 
 	exprs := []interfaces.Expr{}
@@ -81,26 +94,20 @@ func RagelInterpolate(str string, pos *interfaces.Pos, data *interfaces.Data) (i
 		switch t := term.(type) {
 		case Literal:
 			expr := &ast.ExprStr{
-				V: t.Value,
+				Textarea: *textarea, // XXX: until we re-calculate
+				V:        t.Value,
 			}
 			exprs = append(exprs, expr)
 
 		case Variable:
 			expr := &ast.ExprVar{
-				Name: t.Name,
+				Textarea: *textarea, // XXX: until we re-calculate
+				Name:     t.Name,
 			}
 			exprs = append(exprs, expr)
 		default:
 			return nil, fmt.Errorf("unknown term (%T): %+v", t, t)
 		}
-	}
-
-	// If we didn't find anything of value, we got an empty string...
-	if len(sequence) == 0 && str == "" { // be doubly sure...
-		expr := &ast.ExprStr{
-			V: "",
-		}
-		exprs = append(exprs, expr)
 	}
 
 	// The parser produces non-optimal results where two strings are next to
@@ -120,13 +127,14 @@ func RagelInterpolate(str string, pos *interfaces.Pos, data *interfaces.Data) (i
 
 // HilInterpolate interpolates a string and returns the representative AST. This
 // particular implementation uses the hashicorp hil library and syntax to do so.
-func HilInterpolate(str string, pos *interfaces.Pos, data *interfaces.Data) (interfaces.Expr, error) {
+func HilInterpolate(str string, textarea *interfaces.Textarea, data *interfaces.Data) (interfaces.Expr, error) {
 	var line, column int = -1, -1
 	var filename string
-	if pos != nil {
-		line = pos.Line
-		column = pos.Column
-		filename = pos.Filename
+	if textarea != nil {
+		startLine, startColumn := textarea.Pos() // zero based
+		line = startLine
+		column = startColumn
+		filename = textarea.Filename() // TODO: .Path() instead?
 	}
 	hilPos := hilast.Pos{
 		Line:     line,

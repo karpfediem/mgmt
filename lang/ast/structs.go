@@ -183,7 +183,8 @@ var (
 // StmtBind is a representation of an assignment, which binds a variable to an
 // expression.
 type StmtBind struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Ident string
@@ -378,7 +379,8 @@ func (obj *StmtBind) Output(map[interfaces.Func]types.Value) (*interfaces.Output
 // TODO: Consider expanding Name to have this return a list of Res's in the
 // Output function if it is a map[name]struct{}, or even a map[[]name]struct{}.
 type StmtRes struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Kind     string            // kind of resource, eg: pkg, file, svc, etc...
@@ -1594,7 +1596,8 @@ type StmtResContents interface {
 // StmtResField represents a single field in the parsed resource representation.
 // This does not satisfy the Stmt interface.
 type StmtResField struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Field        string
@@ -1879,7 +1882,8 @@ func (obj *StmtResField) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 // StmtResEdge represents a single edge property in the parsed resource
 // representation. This does not satisfy the Stmt interface.
 type StmtResEdge struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Property     string // TODO: iota constant instead?
@@ -2129,7 +2133,8 @@ func (obj *StmtResEdge) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 // correspond to the particular meta parameter specified. This does not satisfy
 // the Stmt interface.
 type StmtResMeta struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Property     string // TODO: iota constant instead?
@@ -2683,7 +2688,8 @@ func (obj *StmtResCollect) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 // names are compatible and listed. In this case of Send/Recv, only lists of
 // length two are legal.
 type StmtEdge struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	EdgeHalfList []*StmtEdgeHalf // represents a chain of edges
@@ -3032,7 +3038,8 @@ func (obj *StmtEdge) Output(table map[interfaces.Func]types.Value) (*interfaces.
 // is assumed that a list of strings should be expected. More mechanisms to
 // determine if the value is static may be added over time.
 type StmtEdgeHalf struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Kind     string          // kind of resource, eg: pkg, file, svc, etc...
@@ -3203,7 +3210,8 @@ func (obj *StmtEdgeHalf) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 // optional, it is the else branch, although this struct allows either to be
 // optional, even if it is not commonly used.
 type StmtIf struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Condition    interfaces.Expr
@@ -3569,7 +3577,8 @@ func (obj *StmtIf) Output(table map[interfaces.Func]types.Value) (*interfaces.Ou
 
 // StmtFor represents an iteration over a list. The body contains statements.
 type StmtFor struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -3951,6 +3960,8 @@ func (obj *StmtFor) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		extendedEnv.Variables[obj.indexParam.envKey] = &interfaces.FuncSingleton{
 			MakeFunc: func() (*pgraph.Graph, interfaces.Func, error) {
 				f := &structs.ConstFunc{
+					Textarea: obj.Textarea, // XXX: advance by `for ` chars?
+
 					Value: &types.IntValue{
 						V: int64(index),
 					},
@@ -4013,6 +4024,8 @@ func (obj *StmtFor) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 	// Add a vertex for the list passing itself.
 	edgeName := structs.ForFuncArgNameList
 	forFunc := &structs.ForFunc{
+		Textarea: obj.Textarea,
+
 		IndexType: obj.indexParam.typ,
 		ValueType: obj.valueParam.typ,
 
@@ -4077,7 +4090,8 @@ func (obj *StmtFor) Output(table map[interfaces.Func]types.Value) (*interfaces.O
 
 // StmtForKV represents an iteration over a map. The body contains statements.
 type StmtForKV struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -4512,6 +4526,8 @@ func (obj *StmtForKV) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 	// Add a vertex for the map passing itself.
 	edgeName := structs.ForKVFuncArgNameMap
 	forKVFunc := &structs.ForKVFunc{
+		Textarea: obj.Textarea,
+
 		KeyType: obj.keyParam.typ,
 		ValType: obj.valParam.typ,
 
@@ -4583,7 +4599,8 @@ func (obj *StmtForKV) Output(table map[interfaces.Func]types.Value) (*interfaces
 // the bind statement's are correctly applied in this scope, and irrespective of
 // their order of definition.
 type StmtProg struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for use by imports
 
@@ -4626,6 +4643,8 @@ func (obj *StmtProg) Apply(fn func(interfaces.Node) error) error {
 // validate.
 func (obj *StmtProg) Init(data *interfaces.Data) error {
 	obj.data = data
+	obj.Textarea.Setup(data)
+
 	obj.importProgs = []*StmtProg{}
 	obj.importFiles = []string{}
 	obj.nodeOrder = []interfaces.Stmt{}
@@ -6177,7 +6196,8 @@ func (obj *StmtProg) IsModuleUnsafe() error { // TODO: rename this function?
 // the supplied function in the current scope and irrespective of the order of
 // definition.
 type StmtFunc struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Name string
@@ -6391,7 +6411,8 @@ func (obj *StmtFunc) Output(map[interfaces.Func]types.Value) (*interfaces.Output
 // TODO: We don't currently support defining polymorphic classes (eg: different
 // signatures for the same class name) but it might be something to consider.
 type StmtClass struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -6601,7 +6622,8 @@ func (obj *StmtClass) Output(table map[interfaces.Func]types.Value) (*interfaces
 // to call a class except that it produces output instead of a value. Most of
 // the interesting logic for classes happens here or in StmtProg.
 type StmtInclude struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope
 
@@ -6828,7 +6850,11 @@ func (obj *StmtInclude) SetScope(scope *interfaces.Scope) error {
 
 	stmt, exists := scope.Classes[obj.Name]
 	if !exists {
-		return fmt.Errorf("class `%s` does not exist in this scope", obj.Name)
+		if obj.data.Debug || true { // TODO: leave this on permanently?
+			classScopeFeedback(scope, obj.data.Logf)
+		}
+		err := fmt.Errorf("class `%s` does not exist in this scope", obj.Name)
+		return highlightHelper(obj, obj.data.Logf, err)
 	}
 	class, ok := stmt.(*StmtClass)
 	if !ok {
@@ -7095,7 +7121,8 @@ func (obj *StmtInclude) Output(table map[interfaces.Func]types.Value) (*interfac
 // file. As with any statement, it produces output, but that output is empty. To
 // benefit from its inclusion, reference the scope definitions you want.
 type StmtImport struct {
-	Textarea
+	interfaces.Textarea
+
 	data *interfaces.Data
 
 	Name  string
@@ -7204,7 +7231,7 @@ func (obj *StmtImport) Output(map[interfaces.Func]types.Value) (*interfaces.Outp
 // formatting) but so that they can exist anywhere in the code. Currently these
 // are dropped by the lexer.
 type StmtComment struct {
-	Textarea
+	interfaces.Textarea
 
 	Value string
 }
@@ -7224,6 +7251,7 @@ func (obj *StmtComment) Apply(fn func(interfaces.Node) error) error { return fn(
 // Init initializes this branch of the AST, and returns an error if it fails to
 // validate.
 func (obj *StmtComment) Init(data *interfaces.Data) error {
+	//obj.data = data
 	obj.Textarea.Setup(data)
 
 	return nil
@@ -7286,7 +7314,8 @@ func (obj *StmtComment) Output(map[interfaces.Func]types.Value) (*interfaces.Out
 
 // ExprBool is a representation of a boolean.
 type ExprBool struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -7392,6 +7421,8 @@ func (obj *ExprBool) Check(typ *types.Type) ([]*interfaces.UnificationInvariant,
 // Func returns the reactive stream of values that this expression produces.
 func (obj *ExprBool) Func() (interfaces.Func, error) {
 	return &structs.ConstFunc{
+		Textarea: obj.Textarea,
+
 		Value: &types.BoolValue{V: obj.V},
 	}, nil
 }
@@ -7439,7 +7470,8 @@ func (obj *ExprBool) Value() (types.Value, error) {
 
 // ExprStr is a representation of a string.
 type ExprStr struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -7471,14 +7503,6 @@ func (obj *ExprStr) Init(data *interfaces.Data) error {
 // which need interpolation. If any are found, it returns a larger AST which has
 // a function which returns a string as its root. Otherwise it returns itself.
 func (obj *ExprStr) Interpolate() (interfaces.Expr, error) {
-	pos := &interfaces.Pos{
-		// XXX: populate this?
-		// column/line number, starting at 1
-		//Column: -1, // TODO
-		//Line: -1, // TODO
-		//Filename: "", // optional source filename, if known
-	}
-
 	data := &interfaces.Data{
 		// TODO: add missing fields here if/when needed
 		Fs:       obj.data.Fs,
@@ -7502,11 +7526,12 @@ func (obj *ExprStr) Interpolate() (interfaces.Expr, error) {
 		},
 	}
 
-	result, err := obj.data.StrInterpolater(obj.V, pos, data)
+	result, err := obj.data.StrInterpolater(obj.V, &obj.Textarea, data)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
+	// a nil result means unchanged, string didn't need interpolating done
+	if result == nil { // we still copy since Interpolate always "copies"
 		return &ExprStr{
 			Textarea: obj.Textarea,
 			data:     obj.data,
@@ -7595,6 +7620,8 @@ func (obj *ExprStr) Check(typ *types.Type) ([]*interfaces.UnificationInvariant, 
 // Func returns the reactive stream of values that this expression produces.
 func (obj *ExprStr) Func() (interfaces.Func, error) {
 	return &structs.ConstFunc{
+		Textarea: obj.Textarea,
+
 		Value: &types.StrValue{V: obj.V},
 	}, nil
 }
@@ -7641,7 +7668,8 @@ func (obj *ExprStr) Value() (types.Value, error) {
 
 // ExprInt is a representation of an int.
 type ExprInt struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -7747,6 +7775,8 @@ func (obj *ExprInt) Check(typ *types.Type) ([]*interfaces.UnificationInvariant, 
 // Func returns the reactive stream of values that this expression produces.
 func (obj *ExprInt) Func() (interfaces.Func, error) {
 	return &structs.ConstFunc{
+		Textarea: obj.Textarea,
+
 		Value: &types.IntValue{V: obj.V},
 	}, nil
 }
@@ -7793,7 +7823,8 @@ func (obj *ExprInt) Value() (types.Value, error) {
 
 // ExprFloat is a representation of a float.
 type ExprFloat struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 
@@ -7901,6 +7932,8 @@ func (obj *ExprFloat) Check(typ *types.Type) ([]*interfaces.UnificationInvariant
 // Func returns the reactive stream of values that this expression produces.
 func (obj *ExprFloat) Func() (interfaces.Func, error) {
 	return &structs.ConstFunc{
+		Textarea: obj.Textarea,
+
 		Value: &types.FloatValue{V: obj.V},
 	}, nil
 }
@@ -7947,7 +7980,8 @@ func (obj *ExprFloat) Value() (types.Value, error) {
 
 // ExprList is a representation of a list.
 type ExprList struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -8211,6 +8245,8 @@ func (obj *ExprList) Func() (interfaces.Func, error) {
 
 	// composite func (list, map, struct)
 	return &structs.CompositeFunc{
+		Textarea: obj.Textarea,
+
 		Type: typ,
 		Len:  len(obj.Elements),
 	}, nil
@@ -8311,7 +8347,8 @@ func (obj *ExprList) Value() (types.Value, error) {
 
 // ExprMap is a representation of a (dictionary) map.
 type ExprMap struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -8662,6 +8699,8 @@ func (obj *ExprMap) Func() (interfaces.Func, error) {
 
 	// composite func (list, map, struct)
 	return &structs.CompositeFunc{
+		Textarea: obj.Textarea,
+
 		Type: typ, // the key/val types are known via this type
 		Len:  len(obj.KVs),
 	}, nil
@@ -8800,7 +8839,7 @@ func (obj *ExprMap) Value() (types.Value, error) {
 // ExprMapKV represents a key and value pair in a (dictionary) map. This does
 // not satisfy the Expr interface.
 type ExprMapKV struct {
-	Textarea
+	interfaces.Textarea
 
 	Key interfaces.Expr // keys can be strings, int's, etc...
 	Val interfaces.Expr
@@ -8808,7 +8847,8 @@ type ExprMapKV struct {
 
 // ExprStruct is a representation of a struct.
 type ExprStruct struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -9098,6 +9138,8 @@ func (obj *ExprStruct) Func() (interfaces.Func, error) {
 
 	// composite func (list, map, struct)
 	return &structs.CompositeFunc{
+		Textarea: obj.Textarea,
+
 		Type: typ,
 	}, nil
 }
@@ -9204,7 +9246,7 @@ func (obj *ExprStruct) Value() (types.Value, error) {
 // ExprStructField represents a name value pair in a struct field. This does not
 // satisfy the Expr interface.
 type ExprStructField struct {
-	Textarea
+	interfaces.Textarea
 
 	Name  string
 	Value interfaces.Expr
@@ -9220,7 +9262,8 @@ type ExprStructField struct {
 // 4. A pure built-in function (set Values to a singleton)
 // 5. A pure polymorphic built-in function (set Values to a list)
 type ExprFunc struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -9316,6 +9359,7 @@ func (obj *ExprFunc) Apply(fn func(interfaces.Node) error) error {
 // validate.
 func (obj *ExprFunc) Init(data *interfaces.Data) error {
 	obj.data = data // TODO: why is this sometimes nil?
+	obj.Textarea.Setup(data)
 
 	// validate that we're using *only* one correct representation
 	a := obj.Body != nil
@@ -10135,7 +10179,8 @@ func (obj *ExprFunc) Value() (types.Value, error) {
 // declaration or implementation of a new function value. This struct has an
 // analogous symmetry with ExprVar.
 type ExprCall struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -10468,7 +10513,8 @@ func (obj *ExprCall) SetScope(scope *interfaces.Scope, sctx map[string]interface
 				if obj.data.Debug || true { // TODO: leave this on permanently?
 					lambdaScopeFeedback(obj.scope, obj.data.Logf)
 				}
-				return fmt.Errorf("lambda `$%s` does not exist in this scope", prefixedName)
+				err := fmt.Errorf("lambda `$%s` does not exist in this scope", prefixedName)
+				return highlightHelper(obj, obj.data.Logf, err)
 			}
 			target = f
 		}
@@ -10484,7 +10530,8 @@ func (obj *ExprCall) SetScope(scope *interfaces.Scope, sctx map[string]interface
 			if obj.data.Debug || true { // TODO: leave this on permanently?
 				functionScopeFeedback(obj.scope, obj.data.Logf)
 			}
-			return fmt.Errorf("func `%s` does not exist in this scope", prefixedName)
+			err := fmt.Errorf("func `%s` does not exist in this scope", prefixedName)
+			return highlightHelper(obj, obj.data.Logf, err)
 		}
 		target = f
 	}
@@ -10953,6 +11000,8 @@ func (obj *ExprCall) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func,
 	// Add a vertex for the call itself.
 	edgeName := structs.CallFuncArgNameFunction
 	callFunc := &structs.CallFunc{
+		Textarea: obj.Textarea,
+
 		Type:        obj.typ,
 		FuncType:    ftyp,
 		EdgeName:    edgeName,
@@ -11112,7 +11161,8 @@ func (obj *ExprCall) Value() (types.Value, error) {
 // ExprVar is a representation of a variable lookup. It returns the expression
 // that that variable refers to.
 type ExprVar struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -11134,6 +11184,7 @@ func (obj *ExprVar) Apply(fn func(interfaces.Node) error) error { return fn(obj)
 // validate.
 func (obj *ExprVar) Init(data *interfaces.Data) error {
 	obj.data = data
+	obj.Textarea.Setup(data)
 
 	return langUtil.ValidateVarName(obj.Name)
 }
@@ -11232,7 +11283,8 @@ func (obj *ExprVar) SetScope(scope *interfaces.Scope, sctx map[string]interfaces
 		if obj.data.Debug || true { // TODO: leave this on permanently?
 			variableScopeFeedback(obj.scope, obj.data.Logf)
 		}
-		return fmt.Errorf("var `$%s` does not exist in this scope", obj.Name)
+		err := fmt.Errorf("var `$%s` does not exist in this scope", obj.Name)
+		return highlightHelper(obj, obj.data.Logf, err)
 	}
 
 	obj.scope.Variables[obj.Name] = target
@@ -11292,7 +11344,8 @@ func (obj *ExprVar) Infer() (*types.Type, []*interfaces.UnificationInvariant, er
 	// lookup value from scope
 	expr, exists := obj.scope.Variables[obj.Name]
 	if !exists {
-		return nil, nil, fmt.Errorf("var `%s` does not exist in this scope", obj.Name)
+		err := fmt.Errorf("var `%s` does not exist in this scope", obj.Name)
+		return nil, nil, highlightHelper(obj, obj.data.Logf, err)
 	}
 
 	// This child call to Infer is an outlier to the common pattern where
@@ -12314,7 +12367,8 @@ func (obj *ExprSingleton) Value() (types.Value, error) {
 // returns a value. As a result, it has a type. This is different from a StmtIf,
 // which does not need to have both branches, and which does not return a value.
 type ExprIf struct {
-	Textarea
+	interfaces.Textarea
+
 	data  *interfaces.Data
 	scope *interfaces.Scope // store for referencing this later
 	typ   *types.Type
@@ -12654,6 +12708,8 @@ func (obj *ExprIf) Func() (interfaces.Func, error) {
 	}
 
 	return &structs.IfFunc{
+		Textarea: obj.Textarea,
+
 		Type: typ, // this is the output type of the expression
 	}, nil
 }
