@@ -72,6 +72,7 @@ class firewall() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
 	}
 
 	svc "shorewall" {
@@ -118,12 +119,14 @@ class firewall:zone_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}zones.header"],
+		Depend => File["${vardir}zones.d/"],
 	}
 }
 
 # NOTE: the firewall type is added automatically by this module
 class firewall:zone($name, $st) {
-	print "zone: ${name}" {}
 	# XXX: document why this is named zone_base instead of base:zone_base or
 	# change the compiler to use the second version?
 	include zone_base
@@ -160,6 +163,8 @@ class firewall:zone($name, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}zones.d/"],
 	}
 }
 
@@ -192,11 +197,13 @@ class firewall:interface_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}interfaces.header"],
+		Depend => File["${vardir}interfaces.d/"],
 	}
 }
 
 class firewall:interface($name, $zone, $st) {
-	print "interface: ${name}" {}
 	include interface_base
 
 	$interface = $st->interface || (golang_strings.to_upper($zone) + "_IF") # eg: NET_IF
@@ -217,6 +224,8 @@ class firewall:interface($name, $zone, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}interfaces.d/"],
 	}
 }
 
@@ -249,11 +258,13 @@ class firewall:policy_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}policy.header"],
+		Depend => File["${vardir}policy.d/"],
 	}
 }
 
 class firewall:policy($name, $st) {
-	print "policy: ${name}" {}
 	include policy_base
 
 	$source = $st->source
@@ -275,6 +286,8 @@ class firewall:policy($name, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}policy.d/"],
 	}
 }
 
@@ -307,11 +320,13 @@ class firewall:rule_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}rules.header"],
+		Depend => File["${vardir}rules.d/"],
 	}
 }
 
 class firewall:rule($name, $st) {
-	print "rule: ${name}" {}
 	include rule_base
 
 	$rule = $st->rule || "" # entire rule contents OR use the below values
@@ -378,6 +393,8 @@ class firewall:rule($name, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}rules.d/"],
 	}
 }
 
@@ -393,6 +410,8 @@ class firewall:bulkrules($name, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}rules.d/"],
 	}
 }
 
@@ -425,11 +444,13 @@ class firewall:stoppedrule_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}stoppedrules.header"],
+		Depend => File["${vardir}stoppedrules.d/"],
 	}
 }
 
 class firewall:stoppedrule($name, $st) {
-	print "stoppedrule: ${name}" {}
 	include stoppedrule_base
 
 	$rule = $st->rule || "" # entire rule contents OR use the below values
@@ -457,6 +478,8 @@ class firewall:stoppedrule($name, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}stoppedrules.d/"],
 	}
 }
 
@@ -489,11 +512,13 @@ class firewall:snat_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}snat.header"],
+		Depend => File["${vardir}snat.d/"],
 	}
 }
 
 class firewall:snat($name, $st) {
-	print "snat: ${name}" {}
 	include snat_base
 
 	$rule = $st->rule || "" # entire rule contents OR use the below values
@@ -547,6 +572,8 @@ class firewall:snat($name, $st) {
 		owner => "root",
 		group => "root",
 		mode => "u=rw,go=",
+
+		Depend => File["${vardir}snat.d/"],
 	}
 }
 
@@ -579,11 +606,13 @@ class firewall:params_base() {
 		mode => "u=rw,go=",
 
 		Notify => Svc["shorewall"],
+		Depend => File["/etc/shorewall/"],
+		Depend => File["${vardir}params.header"],
+		Depend => File["${vardir}params.d/"],
 	}
 }
 
 class firewall:params($name, $st) {
-	print "params: ${name}" {}
 	include params_base
 
 	# TODO: add params
