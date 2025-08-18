@@ -12,10 +12,11 @@
   which,
 }:
 let
+  pname = "mgmt";
   version = "0.0.27";
 in
-buildGoModule rec {
-  pname = "mgmt";
+buildGoModule {
+  inherit pname;
   inherit version;
 
   src = ./.;
