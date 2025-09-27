@@ -9,23 +9,23 @@
   nex,
   pkg-config,
   ragel,
-  which,
 }:
-let
+buildGoModule rec {
   pname = "mgmt";
-  version = "0.0.27";
-in
-buildGoModule {
-  inherit pname;
-  inherit version;
+  version = "1.0.0";
 
-  src = ./.;
+  src = fetchFromGitHub {
+    owner = "purpleidea";
+    repo = "mgmt";
+    rev = version;
+    hash = "sha256-FPvxvPAOKl/XOTC4+6VgOy8O3hJyWQY8+CiCY25PlW4=";
+  };
 
   postPatch = ''
     patchShebangs misc/header.sh
   '';
   preBuild = ''
-    make
+    make lang resources funcgen
   '';
 
   buildInputs = [
@@ -39,7 +39,6 @@ buildGoModule {
     nex
     pkg-config
     ragel
-    which
   ];
 
   ldflags = [
@@ -51,10 +50,10 @@ buildGoModule {
 
   subPackages = [ "." ];
 
-  vendorHash = "sha256-kSEcK4VWuO8FbXr4caH1LLe9O8wdRHs+Csfn85N7+Uc=";
+  vendorHash = "sha256-huKMGmeW4Ee50oVCz9B1XrOdbRbGUI8bF3H1srqyG0A=";
 
   meta = with lib; {
-    description = "Next generation distributed, event-driven, parallel config management!";
+    description = "Next generation distributed, event-driven, parallel config management";
     homepage = "https://mgmtconfig.com";
     license = licenses.gpl3Only;
     maintainers = with maintainers; [ urandom ];
