@@ -14,12 +14,7 @@ buildGoModule rec {
   pname = "mgmt";
   version = "1.0.0";
 
-  src = fetchFromGitHub {
-    owner = "purpleidea";
-    repo = "mgmt";
-    rev = version;
-    hash = "sha256-FPvxvPAOKl/XOTC4+6VgOy8O3hJyWQY8+CiCY25PlW4=";
-  };
+  src = ./.;
 
   postPatch = ''
     patchShebangs misc/header.sh
@@ -50,7 +45,7 @@ buildGoModule rec {
 
   subPackages = [ "." ];
 
-  vendorHash = "sha256-huKMGmeW4Ee50oVCz9B1XrOdbRbGUI8bF3H1srqyG0A=";
+  vendorHash = "sha256-DYIffwMHAVGieWw7pKBznJt8s1jVFQPwVNEqXRLfeYs=";
 
   meta = with lib; {
     description = "Next generation distributed, event-driven, parallel config management";
