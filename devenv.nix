@@ -4,10 +4,12 @@ let
 in
 {
   packages = with pkgs; [
+    gnumake
     golint
     mdl
     gdb
-    etcd
+    pkgs-unstable.delve
+    pkgs-unstable.etcd
     pkg-config
     libvirt
     libxml2
@@ -26,7 +28,18 @@ in
     package = pkgs-unstable.go;
   };
 
-  shell = lib.mkForce (pkgs.buildFHSUserEnv {
+  env.PKG_CONFIG_PATH = with pkgs; lib.concatStringsSep ":" [
+    "${libxml2.dev}/lib/pkgconfig"
+    "${libxml2.dev}/share/pkgconfig"
+    "${augeas.dev}/lib/pkgconfig"
+    "${augeas.dev}/share/pkgconfig"
+    "${libvirt}/lib/pkgconfig"
+    "${libvirt}/share/pkgconfig"
+  ];
+  env.LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [ libxml2 augeas libvirt ];
+
+
+  shell = lib.mkForce (pkgs.buildFHSEnv {
     name = "devenv-shell";
     targetPkgs = _: config.packages;
     runScript = "bash";
