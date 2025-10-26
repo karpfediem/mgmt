@@ -14,7 +14,7 @@
       systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin"];
 
       perSystem = {pkgs, ...}: let
-        mgmt = pkgs.callPackage ./mgmt.nix {};
+        mgmt = pkgs.callPackage ./package.nix {};
       in {
         packages.default = mgmt;
       };
