@@ -12,7 +12,7 @@
 }:
 buildGoModule rec {
   pname = "mgmt";
-  version = "1.0.0";
+  version = "1.0.1-master";
 
   src = ./.;
 
@@ -22,6 +22,9 @@ buildGoModule rec {
   preBuild = ''
     make lang resources funcgen
   '';
+  overrideModAttrs = _: {
+    preBuild = "";
+  };
 
   buildInputs = [
     augeas
@@ -45,7 +48,8 @@ buildGoModule rec {
 
   subPackages = [ "." ];
 
-  vendorHash = "sha256-XZTDqN5nQqze41Y/jOhT3mFHXeR2oPjXpz7CJuPOi8k=";
+
+  vendorHash = "sha256-c8jVgbfLPIbfJ9Qr6ux6QAPvYrJpCpVESnEpr5gVgTE=";
 
   meta = with lib; {
     description = "Next generation distributed, event-driven, parallel config management";
