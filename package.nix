@@ -1,20 +1,21 @@
-{
-  augeas,
-  buildGoModule,
-  fetchFromGitHub,
-  gotools,
-  lib,
-  libvirt,
-  libxml2,
-  nex,
-  pkg-config,
-  ragel,
+{ augeas
+, buildGoModule
+, fetchFromGitHub
+, gotools
+, lib
+, libvirt
+, libxml2
+, nex
+, pkg-config
+, ragel
+,
 }:
 buildGoModule rec {
   pname = "mgmt";
   version = "1.0.1-master";
 
-  src = ./.;
+  # src = ./.;
+  src = fetchFromGitHub { owner = "purpleidea"; repo = "mgmt"; rev = "d49e08cba55c8da991438583a39e788049e67648"; sha256 = "sha256-D1oIDXzlUrSQ9lNvNA2FoatS5shBNvzGKdAC56zldtY="; };
 
   postPatch = ''
     patchShebangs misc/header.sh
@@ -49,7 +50,7 @@ buildGoModule rec {
   subPackages = [ "." ];
 
 
-  vendorHash = "sha256-c8jVgbfLPIbfJ9Qr6ux6QAPvYrJpCpVESnEpr5gVgTE=";
+  vendorHash = "sha256-9ImGmgpdAQOiOJ89bnRAkkajKQKvWKGvZ3vgYxSbk8w=";
 
   meta = with lib; {
     description = "Next generation distributed, event-driven, parallel config management";
