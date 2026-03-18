@@ -37,17 +37,4 @@ in
     "${libvirt}/share/pkgconfig"
   ];
   env.LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [ libxml2 augeas libvirt ];
-
-
-  shell = lib.mkForce (pkgs.buildFHSEnv {
-    name = "devenv-shell";
-    targetPkgs = _: config.packages;
-    runScript = "bash";
-    profile = ''
-      ${lib.optionalString config.devenv.debug "set -x"}
-      ${config.enterShell}
-    '' + lib.concatStringsSep "\n" (lib.mapAttrsToList (name: value: ''
-      export ${name}=${value}
-    '') config.env);
-  }).env;
 }
