@@ -572,19 +572,21 @@ func (obj *FileRes) fileCheckApply(ctx context.Context, apply bool, src io.ReadS
 
 	length := int64(-1)
 
-	srcFile, isFile := src.(*os.File)
 	srcReader, isBytes := src.(*bytes.Reader) // supports seeking!
-	if !isFile && !isBytes {
-		return "", false, fmt.Errorf("can't open src as either file or buffer")
+	srcStater, hasStat := src.(interface {
+		Stat() (os.FileInfo, error)
+	})
+	if !hasStat && !isBytes {
+		return "", false, fmt.Errorf("can't open src as either stat() file or buffer")
 	}
 	if isBytes {
 		length = int64(srcReader.Len())
 	}
 
 	var srcStat os.FileInfo
-	if isFile {
+	if hasStat {
 		var err error
-		srcStat, err = srcFile.Stat()
+		srcStat, err = srcStater.Stat()
 		if err != nil {
 			return "", false, err
 		}
@@ -642,7 +644,7 @@ func (obj *FileRes) fileCheckApply(ctx context.Context, apply bool, src io.ReadS
 		if !dstStat.Mode().IsRegular() {
 			return "", false, fmt.Errorf("non-regular dst file: %s (%q)", dstStat.Name(), dstStat.Mode())
 		}
-		if isFile && os.SameFile(srcStat, dstStat) { // same inode, we're done!
+		if hasStat && os.SameFile(srcStat, dstStat) { // same inode, we're done!
 			return "", true, nil
 		}
 	}
@@ -688,7 +690,7 @@ func (obj *FileRes) fileCheckApply(ctx context.Context, apply bool, src io.ReadS
 	}
 	defer dstFile.Close() // TODO: is this redundant because of the earlier deferred Close() ?
 
-	if isFile { // set mode because it's a new file
+	if hasStat { // set mode because it's a new file
 		if err := dstFile.Chmod(srcStat.Mode()); err != nil {
 			return sha256sum, false, err
 		}
@@ -698,7 +700,7 @@ func (obj *FileRes) fileCheckApply(ctx context.Context, apply bool, src io.ReadS
 	// syscall.Splice(rfd int, roff *int64, wfd int, woff *int64, len int, flags int) (n int64, err error)
 
 	// TODO: should we offer a way to cancel the copy on ^C ?
-	if isFile {
+	if hasStat {
 		obj.init.Logf("copy %d bytes from: %v", length, src)
 	} else if isBytes {
 		obj.init.Logf("copy %d bytes", length)
@@ -1779,8 +1781,8 @@ func (obj *FileRes) Reversed() (engine.ReversibleRes, error) {
 func (obj *FileRes) GraphQueryAllowed(opts ...engine.GraphQueryableOption) error {
 	options := &engine.GraphQueryableOptions{} // default options
 	options.Apply(opts...)                     // apply the options
-	if options.Kind != KindFile {
-		return fmt.Errorf("only other files can access my information")
+	if options.Kind != KindFile && options.Kind != KindDeploySync {
+		return fmt.Errorf("only file and deploy:sync resources can access my information")
 	}
 	return nil
 }
