@@ -790,7 +790,7 @@ func (obj *Engine) AddEdge(f1, f2 interfaces.Func, fe *interfaces.FuncEdge) erro
 		g := obj.graph.Copy()
 		//g.AddVertex(f1)
 		//g.AddVertex(f2)
-		g.AddEdge(f1, f2, fe)
+		interfaces.AddFuncEdge(g, f1, f2, fe)
 		if _, err := g.TopologicalSort(); err != nil {
 			return err // not a dag
 		}
@@ -819,7 +819,7 @@ func (obj *Engine) AddEdge(f1, f2 interfaces.Func, fe *interfaces.FuncEdge) erro
 	//	//obj.resend[f2] = struct{}{} // resend notification to me
 	//}
 
-	obj.graph.AddEdge(f1, f2, fe) // replaces any existing edge here
+	interfaces.AddFuncEdge(obj.graph, f1, f2, fe)
 
 	// This shouldn't error, since the test graph didn't find a cycle. But
 	// we don't really need to do it, since the interrupt will run it too.

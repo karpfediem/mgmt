@@ -372,6 +372,45 @@ func (obj *FuncEdge) String() string {
 	return strings.Join(obj.Args, ", ")
 }
 
+// MergeFuncEdges returns a single edge containing the union of args from both
+// edges, preserving the first-seen order of unique arg names.
+func MergeFuncEdges(existing, incoming *FuncEdge) *FuncEdge {
+	args := []string{}
+	seen := make(map[string]struct{})
+
+	appendArgs := func(edge *FuncEdge) {
+		if edge == nil {
+			return
+		}
+		for _, arg := range edge.Args {
+			if _, exists := seen[arg]; exists {
+				continue
+			}
+			seen[arg] = struct{}{}
+			args = append(args, arg)
+		}
+	}
+
+	appendArgs(existing)
+	appendArgs(incoming)
+
+	return &FuncEdge{Args: args}
+}
+
+// AddFuncEdge adds or updates a FuncEdge in a pgraph, merging arg names if an
+// edge between the same vertices already exists.
+func AddFuncEdge(graph *pgraph.Graph, v1, v2 pgraph.Vertex, edge *FuncEdge) {
+	merged := MergeFuncEdges(nil, edge)
+	if existing := graph.FindEdge(v1, v2); existing != nil {
+		funcEdge, ok := existing.(*FuncEdge)
+		if !ok {
+			panic("edge is not a FuncEdge")
+		}
+		merged = MergeFuncEdges(funcEdge, edge)
+	}
+	graph.AddEdge(v1, v2, merged)
+}
+
 // GraphAPI is a subset of the available graph operations that are possible on a
 // pgraph that is used for storing functions. The minimum subset are those which
 // are needed for implementing the Txn interface.

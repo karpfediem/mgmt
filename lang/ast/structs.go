@@ -3552,7 +3552,7 @@ func (obj *StmtIf) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		Else: obj.ElseBranch,
 	}
 	graph.AddVertex(stmtIfFunc)
-	graph.AddEdge(obj.conditionPtr, stmtIfFunc, &interfaces.FuncEdge{
+	interfaces.AddFuncEdge(graph, obj.conditionPtr, stmtIfFunc, &interfaces.FuncEdge{
 		Args: []string{edgeName},
 	})
 
@@ -4067,7 +4067,7 @@ func (obj *StmtFor) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		//OutputVertex: ???,
 	}
 	graph.AddVertex(forFunc)
-	graph.AddEdge(f, forFunc, &interfaces.FuncEdge{
+	interfaces.AddFuncEdge(graph, f, forFunc, &interfaces.FuncEdge{
 		Args: []string{edgeName},
 	})
 
@@ -4572,7 +4572,7 @@ func (obj *StmtForKV) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		//OutputVertex: ???,
 	}
 	graph.AddVertex(forKVFunc)
-	graph.AddEdge(f, forKVFunc, &interfaces.FuncEdge{
+	interfaces.AddFuncEdge(graph, f, forKVFunc, &interfaces.FuncEdge{
 		Args: []string{edgeName},
 	})
 
@@ -8325,7 +8325,7 @@ func (obj *ExprList) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func,
 
 		fieldName := fmt.Sprintf("%d", index) // argNames as integers!
 		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // element -> list
+		interfaces.AddFuncEdge(graph, f, function, edge) // element -> list
 	}
 
 	return graph, function, nil
@@ -8840,7 +8840,7 @@ func (obj *ExprMap) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func, 
 		// do the key names ever change? -- yes
 		fieldName := fmt.Sprintf("key:%d", index) // stringify map key
 		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // key -> map
+		interfaces.AddFuncEdge(graph, f, function, edge) // key -> map
 	}
 
 	// each map key value pair needs to point to the final map expression
@@ -8853,7 +8853,7 @@ func (obj *ExprMap) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func, 
 
 		fieldName := fmt.Sprintf("val:%d", index) // stringify map val
 		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // val -> map
+		interfaces.AddFuncEdge(graph, f, function, edge) // val -> map
 	}
 
 	return graph, function, nil
@@ -9290,7 +9290,7 @@ func (obj *ExprStruct) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Fun
 
 		fieldName := x.Name
 		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // field -> struct
+		interfaces.AddFuncEdge(graph, f, function, edge) // field -> struct
 	}
 
 	return graph, function, nil
@@ -11170,11 +11170,11 @@ func (obj *ExprCall) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func,
 	}
 	graph.AddVertex(callFunc)
 
-	graph.AddEdge(funcValueFunc, callFunc, &interfaces.FuncEdge{
+	interfaces.AddFuncEdge(graph, funcValueFunc, callFunc, &interfaces.FuncEdge{
 		Args: []string{edgeName},
 	})
 
-	graph.AddEdge(callFunc, callSubgraphOutput, &interfaces.FuncEdge{
+	interfaces.AddFuncEdge(graph, callFunc, callSubgraphOutput, &interfaces.FuncEdge{
 		Args: []string{edgeNameDummy},
 	})
 
@@ -12929,9 +12929,9 @@ func (obj *ExprIf) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func, e
 	graph.AddVertex(function)
 
 	edge := &interfaces.FuncEdge{Args: []string{edgeName}}
-	graph.AddEdge(f, function, edge) // condition -> exprif
+	interfaces.AddFuncEdge(graph, f, function, edge) // condition -> exprif
 
-	graph.AddEdge(function, exprIfSubgraphOutput, &interfaces.FuncEdge{
+	interfaces.AddFuncEdge(graph, function, exprIfSubgraphOutput, &interfaces.FuncEdge{
 		Args: []string{edgeNameDummy},
 	})
 

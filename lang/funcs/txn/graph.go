@@ -82,13 +82,13 @@ func (obj *Graph) AddEdge(f1, f2 interfaces.Func, fe *interfaces.FuncEdge) error
 
 	// safety check to avoid cycles
 	g := obj.graph.Copy()
-	g.AddEdge(f1, f2, fe)
+	interfaces.AddFuncEdge(g, f1, f2, fe)
 	if _, err := g.TopologicalSort(); err != nil {
 		return err // not a dag
 	}
 	// if we didn't cycle, we can modify the real graph safely...
 
-	obj.graph.AddEdge(f1, f2, fe) // replaces any existing edge here
+	interfaces.AddFuncEdge(obj.graph, f1, f2, fe)
 
 	// This shouldn't error, since the test graph didn't find a cycle.
 	if _, err := obj.graph.TopologicalSort(); err != nil {
