@@ -43,6 +43,86 @@ import (
 	"github.com/purpleidea/mgmt/util/errwrap"
 )
 
+const (
+	collectFilesKindDeploySync = "deploy:sync"
+	collectFilesFieldSource    = "source"
+	collectFilesFuncAbsPath    = "deploy.abspath"
+)
+
+func collectStmtFiles(stmt interfaces.Stmt) ([]string, error) {
+	switch obj := stmt.(type) {
+	case *StmtProg:
+		return obj.importFiles, nil
+	case *StmtRes:
+		return collectResourceFiles(obj)
+	default:
+		return nil, nil
+	}
+}
+
+func collectResourceFiles(stmt *StmtRes) ([]string, error) {
+	if stmt.Kind != collectFilesKindDeploySync {
+		return nil, nil
+	}
+
+	fileList := []string{}
+	for _, line := range stmt.Contents {
+		field, ok := line.(*StmtResField)
+		if !ok || field.Field != collectFilesFieldSource {
+			continue
+		}
+
+		source, err := collectResourceFilePath(field.Value, stmt.data.Base)
+		if err != nil {
+			return nil, errwrap.Wrapf(err, "could not determine `%s` field for `%s` resource", collectFilesFieldSource, stmt.Kind)
+		}
+		fileList = append(fileList, source)
+	}
+
+	return fileList, nil
+}
+
+func collectResourceFilePath(expr interfaces.Expr, base string) (string, error) {
+	switch obj := expr.(type) {
+	case *ExprStr:
+		return obj.V, nil
+
+	case *ExprCall:
+		if obj.Name != collectFilesFuncAbsPath {
+			break
+		}
+		if len(obj.Args) != 1 {
+			return "", fmt.Errorf("unexpected arg length for `%s`", collectFilesFuncAbsPath)
+		}
+		arg, ok := obj.Args[0].(*ExprStr)
+		if !ok {
+			return "", fmt.Errorf("unexpected arg type for `%s`", collectFilesFuncAbsPath)
+		}
+
+		p := strings.TrimSuffix(base, "/")
+		if p == base {
+			return "", fmt.Errorf("base has no trailing slash: `%s`", base)
+		}
+		if arg.V == "" {
+			return p + "/", nil
+		}
+		if !strings.HasPrefix(arg.V, "/") {
+			return "", fmt.Errorf("path was not absolute, got: `%s`", arg.V)
+		}
+		return p + arg.V, nil
+	}
+
+	value, err := expr.Value()
+	if err != nil {
+		return "", err
+	}
+	if err := types.TypeStr.Cmp(value.Type()); err != nil {
+		return "", errwrap.Wrapf(err, "expression is not a string")
+	}
+
+	return value.Str(), nil
+}
+
 // FuncPrefixToFunctionsScope is a helper function to return the functions
 // portion of the scope from a function prefix lookup. Basically this wraps the
 // implementation in the Func interface in the *ExprFunc struct.
@@ -266,12 +346,11 @@ func CollectFiles(ast interfaces.Stmt) ([]string, error) {
 		if !ok {
 			return nil
 		}
-		body, ok := stmt.(*StmtProg)
-		if !ok {
-			return nil
+		files, err := collectStmtFiles(stmt)
+		if err != nil {
+			return err
 		}
-		// collect into global
-		fileList = append(fileList, body.importFiles...)
+		fileList = append(fileList, files...)
 		return nil
 	}
 	if err := ast.Apply(fn); err != nil {

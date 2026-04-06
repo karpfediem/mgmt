@@ -14,8 +14,8 @@ buildGoModule rec {
   pname = "mgmt";
   version = "1.0.1-master";
 
-  # src = ./.;
-  src = fetchFromGitHub { owner = "purpleidea"; repo = "mgmt"; rev = "c7ab7de9acdcb8a129638d351a2a3c4d75f8ce23"; sha256 = "sha256-A5iwaOB9t5vmTt93AdPEoh0+61dMngp3uCopVp/0Ig8="; };
+  src = ./.;
+  # src = fetchFromGitHub { owner = "purpleidea"; repo = "mgmt"; rev = "c7ab7de9acdcb8a129638d351a2a3c4d75f8ce23"; sha256 = "sha256-A5iwaOB9t5vmTt93AdPEoh0+61dMngp3uCopVp/0Ig8="; };
 
   postPatch = ''
     patchShebangs misc/header.sh
