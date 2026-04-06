@@ -318,13 +318,14 @@ func (obj *CollectFunc) Stream(ctx context.Context) error {
 			if obj.kind == nil {
 				obj.kind = &kind // store
 				var err error
-				//  Don't send a value right away, wait for the
-				// first Watch startup event to get one!
 				obj.watchChan, err = obj.init.World.ResWatch(ctx, kind) // watch for var changes
 				if err != nil {
 					return err
 				}
-				continue // we get values on the watch chan, not here!
+				if err := obj.init.Event(ctx); err != nil {
+					return err
+				}
+				continue
 			}
 
 			if *obj.kind == kind {
