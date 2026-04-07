@@ -49,7 +49,7 @@ buildGoModule rec {
   subPackages = [ "." ];
 
 
-  vendorHash = "sha256-c8jVgbfLPIbfJ9Qr6ux6QAPvYrJpCpVESnEpr5gVgTE=";
+  vendorHash = "sha256-ZrVLj22WKDBiD//UbRNL8WrI3jB+MlKHQJFjr3LJHO4=";
 
   meta = with lib; {
     description = "Next generation distributed, event-driven, parallel config management";
