@@ -76,29 +76,8 @@ type Data struct {
 	// Version is the version of this program, usually set at compile time.
 	Version string
 
-	// Debug represents if we're running in debug mode or not.
-	Debug bool
-
-	// Logf is a logger which should be used.
-	Logf func(format string, v ...interface{})
-
-	// Args is the CLI struct to use. This takes the format of the go-arg
-	// API. Keep in mind that these values will be added on to the normal
-	// run subcommand with frontend that is chosen. Make sure you don't add
-	// anything that would conflict with that. Of note, a new subcommand is
-	// probably not what you want. To do more complicated things, you will
-	// need to implement a different custom API with Customizable.
-	Args interface{}
-
-	// Frontend is the name of the GAPI to run.
-	Frontend string
-
-	// Top is the initial input or code to run.
-	Top []byte
-
-	// Customizable is an additional API you can implement to have tighter
-	// control over how the entry executes mgmt.
-	Custom Customizable
+	// Command is the registered subcommand implementation.
+	Command Command
 }
 
 // Validate verifies that the structure has acceptable data stored within.
@@ -112,18 +91,12 @@ func (obj *Data) Validate() error {
 	if obj.Version == "" {
 		return fmt.Errorf("version is empty")
 	}
-	if _, err := arg.NewParser(arg.Config{}, obj.Args); err != nil { // sanity check
-		return errwrap.Wrapf(err, "invalid args cli struct")
+	if obj.Command == nil {
+		return fmt.Errorf("command is nil")
 	}
-	if obj.Frontend == "" {
-		return fmt.Errorf("frontend is empty")
+	if err := obj.Command.Validate(); err != nil {
+		return err
 	}
-	if len(obj.Top) == 0 {
-		return fmt.Errorf("top is empty")
-	}
-	//if obj.Custom == nil { // this is allowed!
-	//	return fmt.Errorf("custom is nil")
-	//}
 
 	return nil
 }
@@ -202,8 +175,67 @@ func (obj *Runner) CLI(ctx context.Context, data *cliUtil.Data) error {
 	if data.Copying == "" {
 		return fmt.Errorf("program copyrights were removed, can't run")
 	}
+	if obj.data.Command == nil {
+		return fmt.Errorf("registered command was nil")
+	}
+	return obj.data.Command.Run(ctx, data, obj.data)
+}
 
-	// TODO: If obj.data has any special API's for getting program name,
+// Command is the interface implemented by registered entrypoint commands.
+type Command interface {
+	Validate() error
+	Run(context.Context, *cliUtil.Data, *Data) error
+}
+
+// RunCommand executes an alternate entrypoint through the normal run/frontend
+// plumbing.
+type RunCommand struct {
+	// Debug represents if we're running in debug mode or not.
+	Debug bool
+
+	// Logf is a logger which should be used.
+	Logf func(format string, v ...interface{})
+
+	// Args is the CLI struct to use. This takes the format of the go-arg
+	// API. Keep in mind that these values will be added on to the normal
+	// run subcommand with frontend that is chosen. Make sure you don't add
+	// anything that would conflict with that. Of note, a new subcommand is
+	// probably not what you want. To do more complicated things, you will
+	// need to implement a different custom API with Customizable.
+	Args interface{}
+
+	// Frontend is the name of the GAPI to run.
+	Frontend string
+
+	// Top is the initial input or code to run.
+	Top []byte
+
+	// Customizable is an additional API you can implement to have tighter
+	// control over how the entry executes mgmt.
+	Custom Customizable
+}
+
+// Validate verifies that the run command has acceptable data stored within.
+func (obj *RunCommand) Validate() error {
+	if obj == nil {
+		return fmt.Errorf("run command is nil")
+	}
+	if _, err := arg.NewParser(arg.Config{}, obj.Args); err != nil { // sanity check
+		return errwrap.Wrapf(err, "invalid args cli struct")
+	}
+	if obj.Frontend == "" {
+		return fmt.Errorf("frontend is empty")
+	}
+	if len(obj.Top) == 0 {
+		return fmt.Errorf("top is empty")
+	}
+
+	return nil
+}
+
+// Run executes the run/frontend path for this command.
+func (obj *RunCommand) Run(ctx context.Context, data *cliUtil.Data, reg *Data) error {
+	// TODO: If reg has any special API's for getting program name,
 	// version, or anything else in particular, we can use those values to
 	// override what we get at compile time from main.main() that comes in
 	// here in our *cliUtil.Data input.
@@ -221,15 +253,15 @@ func (obj *Runner) CLI(ctx context.Context, data *cliUtil.Data) error {
 	// You can pass in more than one struct and they are all used. Neat!
 	// XXX: This generates sub-optimal help text because we mask the subcmd
 	// XXX: Improve the arg parser library so that we can produce good help
-	parser, err := arg.NewParser(config, runnerArgs, runArgs, obj.data.Args) // this is the struct
+	parser, err := arg.NewParser(config, runnerArgs, runArgs, obj.Args) // this is the struct
 	if err != nil {
 		return err
 	}
 
 	osArgs := data.Args[1:] // XXX: args[0] needs to be dropped
-	if obj.data.Custom != nil {
-		osArgs = append(osArgs, obj.data.Frontend) // HACK: add on the frontend sub-command name
-		osArgs = append(osArgs, "''")              // HACK: add on fake input for sub-command
+	if obj.Custom != nil {
+		osArgs = append(osArgs, obj.Frontend) // HACK: add on the frontend sub-command name
+		osArgs = append(osArgs, "''")         // HACK: add on fake input for sub-command
 	}
 	err = parser.Parse(osArgs)
 	if err == arg.ErrHelp {
@@ -265,23 +297,23 @@ func (obj *Runner) CLI(ctx context.Context, data *cliUtil.Data) error {
 		//name = cliUtil.LookupSubcommand(runArgs, cmd) // "lang"
 		args = cmd
 		//fmt.Printf("Input: %+v\n", cmd.Input) // :(
-		cmd.Input = string(obj.data.Top) // overwrite
+		cmd.Input = string(obj.Top) // overwrite
 	}
 	if cmd := runArgs.RunYaml; cmd != nil {
 		//name = cliUtil.LookupSubcommand(runArgs, cmd) // "yaml"
 		args = cmd
-		cmd.Input = string(obj.data.Top) // overwrite
+		cmd.Input = string(obj.Top) // overwrite
 	}
 	_ = args
 
 	//debug := data.Flags.Debug // this one comes from main
-	debug := obj.data.Debug // this one comes from entry
+	debug := obj.Debug // this one comes from entry
 	logf := func(format string, v ...interface{}) {
-		//data.Flags.Logf(obj.data.Program+": "+format, v...)
-		obj.data.Logf(obj.data.Program+": "+format, v...)
+		//data.Flags.Logf(reg.Program+": "+format, v...)
+		obj.Logf(reg.Program+": "+format, v...)
 	}
-	if obj.data.Custom != nil {
-		if x, ok := obj.data.Custom.(Initable); ok {
+	if obj.Custom != nil {
+		if x, ok := obj.Custom.(Initable); ok {
 			init := &Init{
 				Data:  data,
 				Debug: debug,
@@ -307,7 +339,7 @@ func (obj *Runner) CLI(ctx context.Context, data *cliUtil.Data) error {
 		// by passing in the full runArgs struct (which includes the
 		// frontend parsing) and then we can modify any part of that
 		// whole thing and return it back. That's what we then can use!
-		runArgs, err = obj.data.Custom.Customize(runArgs)
+		runArgs, err = obj.Custom.Customize(runArgs)
 		if err != nil {
 			return err
 		}
@@ -356,4 +388,32 @@ type Customizable interface {
 	Customize(runArgs interface{}) (*cli.RunArgs, error)
 	//Customize(args interface{}) (*lib.Config, error)
 	//Customize(ctx context.Context, runArgs interface{}) error
+}
+
+// ToolHandler executes a standalone tooling subcommand outside the run/frontend
+// plumbing.
+type ToolHandler interface {
+	Run(context.Context, *cliUtil.Data) error
+}
+
+// ToolCommand executes a standalone tooling subcommand.
+type ToolCommand struct {
+	Handler ToolHandler
+}
+
+// Validate verifies that the tooling command has acceptable data stored within.
+func (obj *ToolCommand) Validate() error {
+	if obj == nil {
+		return fmt.Errorf("tool command is nil")
+	}
+	if obj.Handler == nil {
+		return fmt.Errorf("tool command handler is nil")
+	}
+	return nil
+}
+
+// Run executes the tooling command handler.
+func (obj *ToolCommand) Run(ctx context.Context, data *cliUtil.Data, reg *Data) error {
+	_ = reg
+	return obj.Handler.Run(ctx, data)
 }

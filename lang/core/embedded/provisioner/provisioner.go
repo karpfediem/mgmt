@@ -579,17 +579,16 @@ func init() {
 	entry.Register(ModuleName, &entry.Data{
 		Program: ModuleName,
 		Version: Version, // TODO: get from git?
-
-		Debug: false,
-		Logf: func(format string, v ...interface{}) {
-			log.Printf(format, v...)
+		Command: &entry.RunCommand{
+			Debug: false,
+			Logf: func(format string, v ...interface{}) {
+				log.Printf(format, v...)
+			},
+			Args:     a,
+			Custom:   custom,
+			Frontend: Frontend,
+			Top:      top,
 		},
-
-		Args:   a,
-		Custom: custom,
-
-		Frontend: Frontend,
-		Top:      top,
 	})
 
 	if err := custom.Register(fullModuleName); err != nil { // functions from cli
