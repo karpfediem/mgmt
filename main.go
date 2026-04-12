@@ -40,6 +40,7 @@ import (
 	cliUtil "github.com/purpleidea/mgmt/cli/util"
 	"github.com/purpleidea/mgmt/entry"
 	_ "github.com/purpleidea/mgmt/gapi/empty"        // import so the gapi registers
+	_ "github.com/purpleidea/mgmt/lang/fmt/entry"    // import so fmt entrypoints register
 	_ "github.com/purpleidea/mgmt/lang/gapi"         // import so the gapi registers
 	_ "github.com/purpleidea/mgmt/lang/lsp/entry"    // import so optional lsp entrypoints register
 	_ "github.com/purpleidea/mgmt/puppet"            // import so the gapi registers

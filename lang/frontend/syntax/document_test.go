@@ -38,6 +38,9 @@ func TestAnalyzeRoundTrip(t *testing.T) {
 	if got := doc.RawText(); got != source {
 		t.Fatalf("round-trip mismatch\nwant: %q\ngot:  %q", source, got)
 	}
+	if doc.Root == nil {
+		t.Fatalf("expected parse root for valid source")
+	}
 }
 
 func TestAnalyzeMultilineStringStaysDiagnosticFree(t *testing.T) {
@@ -83,10 +86,27 @@ func TestAnalyzeDelimiterDiagnostics(t *testing.T) {
 	if got, want := doc.Diagnostics[0].Message, "unclosed delimiter \"{\""; got != want {
 		t.Fatalf("unexpected diagnostic message: got %q, want %q", got, want)
 	}
+	if doc.Root != nil {
+		t.Fatalf("did not expect parse root for invalid source")
+	}
+}
+
+func TestAnalyzeParseErrorsBecomeDiagnostics(t *testing.T) {
+	doc := Analyze("bad-parse.mcl", []byte("file \"/tmp/x\" {\n\tcontent => \"hello\"\n}\n"))
+
+	if len(doc.Diagnostics) != 1 {
+		t.Fatalf("unexpected diagnostic count: got %d, want 1", len(doc.Diagnostics))
+	}
+	if got, want := doc.Diagnostics[0].Message, "expected \",\", found \"}\""; got != want {
+		t.Fatalf("unexpected diagnostic message: got %q, want %q", got, want)
+	}
+	if doc.Root != nil {
+		t.Fatalf("did not expect parse root for malformed source")
+	}
 }
 
 func TestAnalyzeDocumentSymbols(t *testing.T) {
-	source := "import \"fmt\" as fm\n$answer = 42\n$load float = 0.5\nfunc greet($name) {\n}\nclass firewall:zone($name) {\n}\ndocker:image \"nginx\" {}\nhttp:server:ui:input $id {}\ncollect file \"/tmp/hello\" {}\ninclude base.repo(\"x\") as repo\ninclude helper.inner\n"
+	source := "import \"fmt\" as fm\n$answer = 42\n$load float = 0.5\nfunc greet($name) { $name }\nclass firewall:zone($name) {\n}\ndocker:image \"nginx\" {}\nhttp:server:ui:input $id {}\ncollect file \"/tmp/hello\" {}\ninclude base.repo(\"x\") as repo\ninclude helper.inner\n"
 	doc := Analyze("symbols.mcl", []byte(source))
 
 	if len(doc.Diagnostics) != 0 {

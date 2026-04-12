@@ -62,6 +62,7 @@ type Document struct {
 	Tokens      []langtoken.Token
 	Diagnostics []diag.Diagnostic
 	Symbols     []Symbol
+	Root        *FileNode
 }
 
 // Analyze constructs a syntax document from source bytes.
@@ -76,11 +77,19 @@ func AnalyzeFile(file *langsource.File) *Document {
 	}
 
 	tokens := langtoken.Scan(file)
+	diagnostics := collectDiagnostics(tokens)
+	var root *FileNode
+	if len(diagnostics) == 0 {
+		var parseDiagnostics []diag.Diagnostic
+		root, parseDiagnostics = parseFileNode(file, tokens)
+		diagnostics = append(diagnostics, parseDiagnostics...)
+	}
 	return &Document{
 		File:        file,
 		Tokens:      tokens,
-		Diagnostics: collectDiagnostics(tokens),
+		Diagnostics: diagnostics,
 		Symbols:     collectSymbols(tokens),
+		Root:        root,
 	}
 }
 
