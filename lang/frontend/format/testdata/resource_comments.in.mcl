@@ -1,0 +1,14 @@
+# header
+file "/tmp/hello" { # resource
+content=>"hello ${name}\n",
+# keep me
+Meta:noop=>true,
+
+Before=>File["/tmp/source"],
+}
+collect file[
+struct{name=>"/tmp/hello",host=>"h",},
+]{
+# override
+Meta:hidden=>false,
+}

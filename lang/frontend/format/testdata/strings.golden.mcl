@@ -1,0 +1,4 @@
+$template = "hello ${audience} \"quoted\" \$name\n"
+$message = "line1
+line2"
+$escaped = "${name} \${literal}"

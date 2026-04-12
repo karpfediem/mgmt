@@ -1,0 +1,10 @@
+import "fmt"
+$names = ["a", "b",]
+$enabled = true
+if $enabled {
+	file "/tmp/example" {
+		content => fmt.printf("%s\n", $names[0] || ""),
+		# trailing stays
+		mode => if $enabled { "0644" } else { "0600" },
+	}
+}
