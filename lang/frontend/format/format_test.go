@@ -112,11 +112,11 @@ func TestStringsArePreserved(t *testing.T) {
 }
 
 func TestEmptyBlocksStayInlineByDefault(t *testing.T) {
-	src := []byte("print \"name\" {\n}\nfile \"/tmp/x\" {\n}\n")
+	src := []byte("print \"inline\" {}\nfile \"/tmp/x\" {\n}\n")
 
 	got := formatSourceForTest(t, "empty-blocks.mcl", src)
 
-	const want = "print \"name\" {}\nfile \"/tmp/x\" {}\n"
+	const want = "print \"inline\" {}\nfile \"/tmp/x\" {\n}\n"
 	if string(got) != want {
 		t.Fatalf("unexpected formatted output\nwant:\n%s\ngot:\n%s", want, got)
 	}
@@ -138,16 +138,27 @@ func TestFunctionExpressionCallBodyStaysMultiline(t *testing.T) {
 
 	got := formatSourceForTest(t, "func-body.mcl", src)
 
-	const want = "$fn = func($x) {\n\tprintf($x)\n}\n"
+	const want = "$fn = func($x) { printf($x) }\n"
 	if string(got) != want {
 		t.Fatalf("unexpected formatted output\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }
 
-func TestSimpleIfExpressionBranchesInlineByDefault(t *testing.T) {
+func TestExpressionBlocksPreserveExistingMultilineLayout(t *testing.T) {
 	src := []byte("$value = if $ready {\n\t\"yes\"\n} else {\n\t\"no\"\n}\n")
 
 	got := formatSourceForTest(t, "if-simple-inline.mcl", src)
+
+	const want = "$value = if $ready {\n\t\"yes\"\n} else {\n\t\"no\"\n}\n"
+	if string(got) != want {
+		t.Fatalf("unexpected formatted output\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+func TestExpressionBlocksPreserveExistingInlineLayout(t *testing.T) {
+	src := []byte("$value = if $ready { \"yes\" } else { \"no\" }\n")
+
+	got := formatSourceForTest(t, "if-inline-preserve.mcl", src)
 
 	const want = "$value = if $ready { \"yes\" } else { \"no\" }\n"
 	if string(got) != want {
@@ -155,12 +166,12 @@ func TestSimpleIfExpressionBranchesInlineByDefault(t *testing.T) {
 	}
 }
 
-func TestNestedIfExpressionsApplyBranchInliningRecursively(t *testing.T) {
+func TestNestedIfExpressionsPreserveNestedBlockLayout(t *testing.T) {
 	src := []byte("$count = if $input > 8 {\n\t8\n} else {\n\tif $input < 1 {\n\t\t1\n\t} else {\n\t\t$input\n\t}\n}\n")
 
 	got := formatSourceForTest(t, "if-nested-recursive.mcl", src)
 
-	const want = "$count = if $input > 8 {\n\t8\n} else {\n\tif $input < 1 { 1 } else { $input }\n}\n"
+	const want = "$count = if $input > 8 {\n\t8\n} else {\n\tif $input < 1 {\n\t\t1\n\t} else {\n\t\t$input\n\t}\n}\n"
 	if string(got) != want {
 		t.Fatalf("unexpected formatted output\nwant:\n%s\ngot:\n%s", want, got)
 	}
@@ -248,12 +259,12 @@ func TestShortMultilineListStaysMultilineByDefault(t *testing.T) {
 	}
 }
 
-func TestMultilineListOpenerCommentMovesInsideListBody(t *testing.T) {
+func TestMultilineListOpenerCommentStaysOnOpenerLine(t *testing.T) {
 	src := []byte("$values = [ # defaults\n\t1,\n\t2,\n]\n")
 
 	got := formatSourceForTest(t, "list-opener-comment.mcl", src)
 
-	const want = "$values = [\n\t# defaults\n\t1,\n\t2,\n]\n"
+	const want = "$values = [ # defaults\n\t1,\n\t2,\n]\n"
 	if string(got) != want {
 		t.Fatalf("unexpected formatted output\nwant:\n%s\ngot:\n%s", want, got)
 	}

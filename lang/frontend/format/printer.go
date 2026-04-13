@@ -62,19 +62,6 @@ func (obj gapInfo) hasComments() bool {
 	return obj.trailing != "" || len(obj.leading) > 0
 }
 
-func (obj gapInfo) trailingAsLeading() gapInfo {
-	if obj.trailing == "" {
-		return obj
-	}
-	obj.leading = append([]gapComment{{
-		raw:         obj.trailing,
-		blankBefore: false,
-	}}, obj.leading...)
-	obj.trailing = ""
-	obj.trailingPrefix = ""
-	return obj
-}
-
 type printer struct {
 	doc         *syntax.Document
 	builder     strings.Builder
@@ -131,9 +118,9 @@ func writeMultilineDelimitedSequence[T tokenRange](obj *printer, openText, close
 	obj.writeString(openText)
 	obj.indent++
 	if len(items) == 0 {
-		obj.writeGapWithInfo(obj.gap(open, close).trailingAsLeading(), obj.indent, true, true)
+		obj.writeGapWithInfo(obj.gap(open, close), obj.indent, true, true)
 	} else {
-		obj.writeGapWithInfo(obj.gap(open, items[0].StartTokenIndex()).trailingAsLeading(), obj.indent, true, true)
+		obj.writeGapWithInfo(obj.gap(open, items[0].StartTokenIndex()), obj.indent, true, true)
 		for i, item := range items {
 			writeItem(item)
 			if trailingSeparator || i+1 < len(items) {
@@ -205,7 +192,7 @@ func (obj *printer) writeResourceEntrySequence(entries []syntax.ResourceEntry, o
 }
 
 func (obj *printer) writeBlock(block *syntax.Block) {
-	if len(block.Statements) == 0 && !obj.hasCommentsBetween(block.OpenBrace, block.CloseBrace) {
+	if len(block.Statements) == 0 && !obj.usesMultilineLayout(block.OpenBrace, block.CloseBrace) {
 		obj.writeString("{}")
 		return
 	}
@@ -217,7 +204,7 @@ func (obj *printer) writeBlock(block *syntax.Block) {
 }
 
 func (obj *printer) writeExpressionBlock(block *syntax.ExpressionBlock) {
-	obj.writeExpressionBlockWithMode(block, obj.canInlineExpressionBlock(block))
+	obj.writeExpressionBlockWithMode(block, !obj.expressionBlockUsesMultilineLayout(block))
 }
 
 func (obj *printer) writeExpressionBlockWithMode(block *syntax.ExpressionBlock, inline bool) {
@@ -327,7 +314,7 @@ func (obj *printer) writeResourceStatement(node *syntax.ResourceStatement) {
 	obj.writeString(" ")
 	obj.writeExpression(node.Name, 0)
 	obj.writeString(" ")
-	if len(node.Entries) == 0 && !obj.hasCommentsBetween(node.OpenBrace, node.CloseBrace) {
+	if len(node.Entries) == 0 && !obj.usesMultilineLayout(node.OpenBrace, node.CloseBrace) {
 		obj.writeString("{}")
 		return
 	}
@@ -738,6 +725,10 @@ func (obj *printer) hasLineBreakBetween(after, before int) bool {
 	return false
 }
 
+func (obj *printer) usesMultilineLayout(after, before int) bool {
+	return obj.hasCommentsBetween(after, before) || obj.hasLineBreakBetween(after, before)
+}
+
 func (obj *printer) writeString(s string) {
 	if s == "" {
 		return
@@ -756,17 +747,12 @@ func (obj *printer) writeNewline() {
 }
 
 func (obj *printer) writeIfExpression(node *syntax.IfExpression) {
-	inlineThen := obj.canInlineExpressionBlock(node.Then)
-	inlineElse := obj.canInlineExpressionBlock(node.Else)
-	inlineThen = inlineThen && inlineElse
-	inlineElse = inlineThen
-
 	obj.writeString("if ")
 	obj.writeExpression(node.Condition, 0)
 	obj.writeString(" ")
-	obj.writeExpressionBlockWithMode(node.Then, inlineThen)
+	obj.writeExpressionBlock(node.Then)
 	obj.writeString(" else ")
-	obj.writeExpressionBlockWithMode(node.Else, inlineElse)
+	obj.writeExpressionBlock(node.Else)
 }
 
 func (obj *printer) ensureTrailingNewline() {
@@ -775,37 +761,13 @@ func (obj *printer) ensureTrailingNewline() {
 	}
 }
 
-// canInlineExpressionBlock reports whether a single-expression block can be
-// collapsed to `{ expr }` under the current syntactic policy.
-func (obj *printer) canInlineExpressionBlock(block *syntax.ExpressionBlock) bool {
+func (obj *printer) expressionBlockUsesMultilineLayout(block *syntax.ExpressionBlock) bool {
 	if block == nil || block.Value == nil {
-		return true
-	}
-	if obj.hasCommentsBetween(block.OpenBrace, block.Value.StartTokenIndex()) {
 		return false
 	}
-	if obj.hasCommentsBetween(block.Value.EndTokenIndex(), block.CloseBrace) {
-		return false
-	}
-	return obj.isInlineBlockValue(block.Value)
-}
-
-func (obj *printer) isInlineBlockValue(expr syntax.Expression) bool {
-	switch node := expr.(type) {
-	case *syntax.BoolLiteral, *syntax.StringLiteral, *syntax.IntegerLiteral, *syntax.FloatLiteral, *syntax.VariableExpression:
-		return true
-	case *syntax.ParenExpression:
-		return obj.isInlineBlockValue(node.Inner)
-	case *syntax.IndexExpression:
-		return obj.isInlineBlockValue(node.Target) &&
-			obj.isInlineBlockValue(node.Index) &&
-			(node.DefaultValue == nil || obj.isInlineBlockValue(node.DefaultValue))
-	case *syntax.FieldExpression:
-		return obj.isInlineBlockValue(node.Target) &&
-			(node.DefaultValue == nil || obj.isInlineBlockValue(node.DefaultValue))
-	default:
-		return false
-	}
+	return obj.hasCommentsBetween(block.OpenBrace, block.Value.StartTokenIndex()) ||
+		obj.hasCommentsBetween(block.Value.EndTokenIndex(), block.CloseBrace) ||
+		obj.hasLineBreakBetween(block.OpenBrace, block.CloseBrace)
 }
 
 func collectionUsesMultilineLayout[T tokenRange](obj *printer, items []T, open, close int) bool {
