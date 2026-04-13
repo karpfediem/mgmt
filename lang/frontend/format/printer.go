@@ -53,7 +53,6 @@ type gapComment struct {
 
 type gapInfo struct {
 	trailing        string
-	trailingPrefix  string
 	leading         []gapComment
 	blankBeforeNext bool
 }
@@ -204,11 +203,7 @@ func (obj *printer) writeBlock(block *syntax.Block) {
 }
 
 func (obj *printer) writeExpressionBlock(block *syntax.ExpressionBlock) {
-	obj.writeExpressionBlockWithMode(block, !obj.expressionBlockUsesMultilineLayout(block))
-}
-
-func (obj *printer) writeExpressionBlockWithMode(block *syntax.ExpressionBlock, inline bool) {
-	if inline {
+	if !obj.usesMultilineLayout(block.OpenBrace, block.CloseBrace) {
 		obj.writeString("{ ")
 		obj.writeExpression(block.Value, 0)
 		obj.writeString(" }")
@@ -556,7 +551,7 @@ func (obj *printer) writeFunctionTypeArguments(args []*syntax.FunctionTypeArgume
 }
 
 func (obj *printer) writeListLiteral(node *syntax.ListLiteral) {
-	if !collectionUsesMultilineLayout(obj, node.Elements, node.OpenBracket, node.CloseBracket) {
+	if !obj.usesMultilineLayout(node.OpenBracket, node.CloseBracket) {
 		writeInlineDelimitedSequence(obj, "[", "]", ", ", ",", node.Elements, func(element *syntax.ListElement) {
 			obj.writeExpression(element.Value, 0)
 		})
@@ -568,7 +563,7 @@ func (obj *printer) writeListLiteral(node *syntax.ListLiteral) {
 }
 
 func (obj *printer) writeMapLiteral(node *syntax.MapLiteral) {
-	if !collectionUsesMultilineLayout(obj, node.Entries, node.OpenBrace, node.CloseBrace) {
+	if !obj.usesMultilineLayout(node.OpenBrace, node.CloseBrace) {
 		writeInlineDelimitedSequence(obj, "{", "}", ", ", ",", node.Entries, func(entry *syntax.MapEntry) {
 			obj.writeExpression(entry.Key, 0)
 			obj.writeString(" => ")
@@ -584,7 +579,7 @@ func (obj *printer) writeMapLiteral(node *syntax.MapLiteral) {
 }
 
 func (obj *printer) writeStructLiteral(node *syntax.StructLiteral) {
-	if !collectionUsesMultilineLayout(obj, node.Fields, node.OpenBrace, node.CloseBrace) {
+	if !obj.usesMultilineLayout(node.OpenBrace, node.CloseBrace) {
 		writeInlineDelimitedSequence(obj, "struct{", "}", ", ", ",", node.Fields, func(field *syntax.StructLiteralField) {
 			obj.writeString(field.Name)
 			obj.writeString(" => ")
@@ -622,7 +617,6 @@ func (obj *printer) writeGapWithInfo(info gapInfo, indent int, requireLine, pres
 			obj.writeString(info.trailing)
 			obj.indent = saved
 		} else {
-			_ = info.trailingPrefix
 			obj.writeString(" ")
 			obj.writeString(info.trailing)
 		}
@@ -670,18 +664,13 @@ func (obj *printer) gap(after, before int) gapInfo {
 	info := gapInfo{}
 	newlines := 0
 	seenNewline := false
-	inlineSpacing := ""
 	for _, tok := range obj.doc.Tokens[start:before] {
 		if tok.Kind == langtoken.KindWhitespace {
-			if !seenNewline {
-				inlineSpacing += tok.Raw
-			}
 			continue
 		}
 		if tok.Kind == langtoken.KindNewline {
 			newlines += strings.Count(tok.Raw, "\n")
 			seenNewline = true
-			inlineSpacing = ""
 			continue
 		}
 		if tok.Kind != langtoken.KindComment {
@@ -689,7 +678,6 @@ func (obj *printer) gap(after, before int) gapInfo {
 		}
 		if !seenNewline && info.trailing == "" {
 			info.trailing = tok.Raw
-			info.trailingPrefix = inlineSpacing
 		} else {
 			info.leading = append(info.leading, gapComment{
 				raw:         tok.Raw,
@@ -698,7 +686,6 @@ func (obj *printer) gap(after, before int) gapInfo {
 		}
 		newlines = 0
 		seenNewline = true
-		inlineSpacing = ""
 	}
 	info.blankBeforeNext = newlines >= 2
 	return info
@@ -759,19 +746,6 @@ func (obj *printer) ensureTrailingNewline() {
 	if !obj.startOfLine {
 		obj.writeNewline()
 	}
-}
-
-func (obj *printer) expressionBlockUsesMultilineLayout(block *syntax.ExpressionBlock) bool {
-	if block == nil || block.Value == nil {
-		return false
-	}
-	return obj.hasCommentsBetween(block.OpenBrace, block.Value.StartTokenIndex()) ||
-		obj.hasCommentsBetween(block.Value.EndTokenIndex(), block.CloseBrace) ||
-		obj.hasLineBreakBetween(block.OpenBrace, block.CloseBrace)
-}
-
-func collectionUsesMultilineLayout[T tokenRange](obj *printer, items []T, open, close int) bool {
-	return hasCommentsInDelimitedSequence(obj, items, open, close) || obj.hasLineBreakBetween(open, close)
 }
 
 func isSimpleInlineCollection[T tokenRange](obj *printer, items []T, open, close int, hasComplexItem func() bool) bool {
