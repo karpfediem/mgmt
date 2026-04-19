@@ -30,7 +30,9 @@
 package ssh
 
 import (
+	"fmt"
 	"os"
+	"strings"
 
 	sshconfig "github.com/kevinburke/ssh_config"
 
@@ -38,10 +40,13 @@ import (
 )
 
 type sshConfigValues struct {
-	HostName      string
-	User          string
-	Port          string
-	IdentityFiles []string
+	HostName              string
+	User                  string
+	Port                  string
+	IdentityFiles         []string
+	UserKnownHostsFiles   []string
+	GlobalKnownHostsFiles []string
+	IdentitiesOnly        bool
 }
 
 func loadSSHConfigFile(filename string) (*sshconfig.Config, error) {
@@ -97,6 +102,53 @@ func lookupSSHConfigValues(alias, key string, configs ...*sshconfig.Config) ([]s
 	return nil, nil
 }
 
+func lookupSSHConfigBool(alias, key string, configs ...*sshconfig.Config) (bool, error) {
+	value, err := lookupSSHConfigValue(alias, key, configs...)
+	if err != nil {
+		return false, err
+	}
+	switch value {
+	case "":
+		return false, nil
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value for %s: %q", key, value)
+	}
+}
+
+func splitSSHConfigList(value string) []string {
+	return strings.Fields(value)
+}
+
+func (values sshConfigValues) knownHostsCandidates() []string {
+	userKnownHosts := values.UserKnownHostsFiles
+	if len(userKnownHosts) == 0 {
+		userKnownHosts = splitSSHConfigList(sshconfig.Default("UserKnownHostsFile"))
+	}
+
+	globalKnownHosts := values.GlobalKnownHostsFiles
+	if len(globalKnownHosts) == 0 {
+		globalKnownHosts = splitSSHConfigList(sshconfig.Default("GlobalKnownHostsFile"))
+	}
+
+	candidates := make([]string, 0, len(userKnownHosts)+len(globalKnownHosts))
+	candidates = append(candidates, userKnownHosts...)
+	candidates = append(candidates, globalKnownHosts...)
+	return candidates
+}
+
+// If specific identities are configured and IdentitiesOnly is enabled, do not
+// fall back to scanning every id_* key in ~/.ssh.
+func (values sshConfigValues) allowDefaultKeyFallback() bool {
+	if !values.IdentitiesOnly {
+		return true
+	}
+	return len(values.IdentityFiles) == 0
+}
+
 func resolveSSHConfigValues(alias string, userConfig, systemConfig *sshconfig.Config) (sshConfigValues, error) {
 	values := sshConfigValues{}
 
@@ -123,6 +175,24 @@ func resolveSSHConfigValues(alias string, userConfig, systemConfig *sshconfig.Co
 		return values, err
 	}
 	values.IdentityFiles = identityFiles
+
+	userKnownHosts, err := lookupSSHConfigValue(alias, "UserKnownHostsFile", userConfig, systemConfig)
+	if err != nil {
+		return values, err
+	}
+	values.UserKnownHostsFiles = splitSSHConfigList(userKnownHosts)
+
+	globalKnownHosts, err := lookupSSHConfigValue(alias, "GlobalKnownHostsFile", userConfig, systemConfig)
+	if err != nil {
+		return values, err
+	}
+	values.GlobalKnownHostsFiles = splitSSHConfigList(globalKnownHosts)
+
+	identitiesOnly, err := lookupSSHConfigBool(alias, "IdentitiesOnly", userConfig, systemConfig)
+	if err != nil {
+		return values, err
+	}
+	values.IdentitiesOnly = identitiesOnly
 
 	return values, nil
 }

@@ -62,7 +62,6 @@ const (
 	defaultSSHHostKeyFieldName        = "hostkey" // querystring field name
 	defaultEtcdPort            uint16 = 2379      // TODO: get this from etcd pkg
 	defaultSSHDir                     = "~/.ssh/"
-	defaultKnownHostsPath             = "~/.ssh/known_hosts"
 	allowRSA                          = true // are big keys okay?
 )
 
@@ -257,7 +256,45 @@ func (obj *World) knownHostsKey(hostkey string) (ssh.PublicKey, error) {
 
 // hostKeyCallback is a helper function to get the ssh callback function needed.
 // func (obj *World) hostKeyCallback() (ssh.HostKeyCallback, error) {
-func (obj *World) hostKeyCallback(hostkey ssh.PublicKey) ssh.HostKeyCallback {
+func (obj *World) knownHostsPaths(configValues sshConfigValues) ([]string, error) {
+	candidates := configValues.knownHostsCandidates()
+	seen := make(map[string]struct{}, len(candidates))
+	paths := []string{}
+
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate, "none") {
+			continue
+		}
+
+		p, err := util.ExpandHome(candidate)
+		if err != nil {
+			return nil, errwrap.Wrapf(err, "can't find home directory for known_hosts file")
+		}
+		if p == "" {
+			return nil, fmt.Errorf("empty known_hosts path specified")
+		}
+		if _, exists := seen[p]; exists {
+			continue
+		}
+
+		if _, err := os.Stat(p); err != nil {
+			if os.IsNotExist(err) {
+				if obj.init.Debug {
+					obj.init.Logf("known_hosts file ignored: %s", p)
+				}
+				continue
+			}
+			return nil, errwrap.Wrapf(err, "can't access known_hosts file")
+		}
+
+		seen[p] = struct{}{}
+		paths = append(paths, p)
+	}
+
+	return paths, nil
+}
+
+func (obj *World) hostKeyCallback(hostkey ssh.PublicKey, configValues sshConfigValues) ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		obj.init.Logf("server host key type: %s", key.Type())
 		obj.init.Logf("host key fingerprint: %s", ssh.FingerprintSHA256(key))
@@ -274,23 +311,21 @@ func (obj *World) hostKeyCallback(hostkey ssh.PublicKey) ssh.HostKeyCallback {
 			obj.init.Logf("did not match known key: %s", ssh.FingerprintSHA256(hostkey))
 		}
 
-		// TODO: consider allowing a user-specified path in the future
-		s := defaultKnownHostsPath // "~/.ssh/known_hosts"
-
-		// expand strings of the form: ~james/.ssh/known_hosts
-		p, err := util.ExpandHome(s)
-		if err != nil {
-			return errwrap.Wrapf(err, "can't find home directory for known_hosts file")
-		}
-		if p == "" {
-			return fmt.Errorf("empty known_hosts path specified")
-		}
-
-		fn, err := knownhosts.New(p)
+		paths, err := obj.knownHostsPaths(configValues)
 		if err != nil {
 			return err
 		}
-		obj.init.Logf("trying known_hosts file at: %s", p)
+		if len(paths) == 0 {
+			return fmt.Errorf("no accessible known_hosts files found")
+		}
+
+		fn, err := knownhosts.New(paths...)
+		if err != nil {
+			return err
+		}
+		for _, p := range paths {
+			obj.init.Logf("trying known_hosts file at: %s", p)
+		}
 		err = fn(hostname, remote, key)
 		if err == nil {
 			obj.init.Logf("host key matched")
@@ -456,7 +491,7 @@ func (obj *World) Connect(ctx context.Context, init *engine.WorldInit) error {
 		}
 	}
 
-	if len(auths) == 0 {
+	if len(auths) == 0 && configValues.allowDefaultKeyFallback() {
 		signers, err := obj.keySigners()
 		if err != nil {
 			return err
@@ -469,6 +504,8 @@ func (obj *World) Connect(ctx context.Context, init *engine.WorldInit) error {
 		if len(signers) > 0 {
 			auths = append(auths, ssh.PublicKeys(signers...)) // add all
 		}
+	} else if len(auths) == 0 && obj.init.Debug {
+		obj.init.Logf("skipping default key scan because IdentitiesOnly=yes")
 	}
 
 	if len(auths) == 0 {
@@ -489,7 +526,7 @@ func (obj *World) Connect(ctx context.Context, init *engine.WorldInit) error {
 		User: user,
 		Auth: auths,
 		//HostKeyCallback: ssh.InsecureIgnoreHostKey(), // testing
-		HostKeyCallback: obj.hostKeyCallback(pubKey),
+		HostKeyCallback: obj.hostKeyCallback(pubKey, configValues),
 
 		// This is the list of host key algorithms that this SSH client
 		// will offer to the SSH server when it says hello. This can be
