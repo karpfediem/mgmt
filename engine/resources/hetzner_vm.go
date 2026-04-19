@@ -33,6 +33,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"time"
 
 	"github.com/purpleidea/mgmt/engine"
@@ -153,6 +154,7 @@ func init() {
 // 3) https://github.com/jefmasereel/hcloud-go-getopts
 type HetznerVMRes struct {
 	traits.Base
+	traits.Sendable
 	init *engine.Init
 
 	// APIToken specifies the unique API token corresponding to a Hetzner
@@ -308,6 +310,19 @@ type HetznerVMRes struct {
 	actionWaiter hetznerActionWaiter
 }
 
+// HetznerVMSends is the struct of observed VM metadata that this resource can
+// publish reactively via send/recv edges.
+type HetznerVMSends struct {
+	ServerID          int64    `lang:"serverid"`
+	Status            string   `lang:"status"`
+	PublicIPv4        string   `lang:"publicipv4"`
+	PublicIPv6        string   `lang:"publicipv6"`
+	PublicIPv6Network string   `lang:"publicipv6network"`
+	PrivateIPs        []string `lang:"privateips"`
+	Location          string   `lang:"location"`
+	Datacenter        string   `lang:"datacenter"`
+}
+
 // Default returns some conservative defaults for this resource.
 func (obj *HetznerVMRes) Default() engine.Res {
 	return &HetznerVMRes{
@@ -447,10 +462,19 @@ func (obj *HetznerVMRes) Watch(context.Context) error {
 // NOTE: this last assumption might still fail in case the same resource
 // instance is managed by multiple running mgmt instances!
 // TODO: possible to ensure safe concurrency?
-func (obj *HetznerVMRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
-	checkOK := true
+func (obj *HetznerVMRes) CheckApply(ctx context.Context, apply bool) (checkOK bool, err error) {
+	checkOK = true
+	defer func() {
+		if err != nil {
+			return
+		}
+		if sendErr := obj.sendMetadata(); sendErr != nil {
+			checkOK = false
+			err = sendErr
+		}
+	}()
 	// Request up-to-date server info from the API.
-	if err := obj.getServerUpdate(ctx); err != nil {
+	if err = obj.getServerUpdate(ctx); err != nil {
 		return false, errwrap.Wrapf(err, "getServerUpdate failed")
 	}
 	// Try to get the server in the correct state (if it is not already there).
@@ -721,6 +745,70 @@ func (obj *HetznerVMRes) getServerUpdate(ctx context.Context) error {
 	}
 	obj.server = server
 	return nil
+}
+
+func (obj *HetznerVMRes) sendMetadata() error {
+	sends := obj.metadataSends()
+	if obj.init != nil && obj.init.Send != nil {
+		return obj.init.Send(sends)
+	}
+	return obj.Send(sends)
+}
+
+func (obj *HetznerVMRes) metadataSends() *HetznerVMSends {
+	sends := &HetznerVMSends{
+		PrivateIPs: []string{},
+	}
+	if obj.server == nil {
+		return sends
+	}
+	sends.ServerID = obj.server.ID
+	sends.Status = string(obj.server.Status)
+	sends.PublicIPv4 = hetznerMetadataIPString(obj.server.PublicNet.IPv4.IP)
+	sends.PublicIPv6 = hetznerMetadataIPString(obj.server.PublicNet.IPv6.IP)
+	sends.PublicIPv6Network = hetznerMetadataIPNetString(obj.server.PublicNet.IPv6.Network)
+	for _, privateNet := range obj.server.PrivateNet {
+		if ip := hetznerMetadataIPString(privateNet.IP); ip != "" {
+			sends.PrivateIPs = append(sends.PrivateIPs, ip)
+		}
+		for _, alias := range privateNet.Aliases {
+			if ip := hetznerMetadataIPString(alias); ip != "" {
+				sends.PrivateIPs = append(sends.PrivateIPs, ip)
+			}
+		}
+	}
+	if obj.server.Location != nil {
+		sends.Location = obj.server.Location.Name
+	}
+	if obj.server.Datacenter != nil {
+		sends.Datacenter = obj.server.Datacenter.Name
+	}
+	return sends
+}
+
+func hetznerMetadataIPString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	if ip.Equal(net.IPv4zero) || ip.Equal(net.IPv6unspecified) {
+		return ""
+	}
+	return ip.String()
+}
+
+func hetznerMetadataIPNetString(network *net.IPNet) string {
+	if network == nil {
+		return ""
+	}
+	return network.String()
+}
+
+// Sends represents the default struct of values that hetzner:vm can publish
+// via send/recv.
+func (obj *HetznerVMRes) Sends() interface{} {
+	return &HetznerVMSends{
+		PrivateIPs: []string{},
+	}
 }
 
 // Cmp compares two resource structs. Returns nil if the comparison holds true,

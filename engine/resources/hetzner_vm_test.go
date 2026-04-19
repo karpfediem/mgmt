@@ -3,6 +3,8 @@ package resources
 import (
 	"context"
 	"fmt"
+	"net"
+	"reflect"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -195,6 +197,85 @@ func TestHetznerVMGetServerCreateKeysUsesNamedSubset(t *testing.T) {
 	}
 	if keys[0].Name != "beta-admin" || keys[1].Name != "beta-breakglass" {
 		t.Fatalf("unexpected key order: %+v", keys)
+	}
+}
+
+func TestHetznerVMMetadataSends(t *testing.T) {
+	_, ipv6Net, err := net.ParseCIDR("2001:db8::/64")
+	if err != nil {
+		t.Fatalf("ParseCIDR failed: %v", err)
+	}
+
+	res := &HetznerVMRes{
+		server: &hcloud.Server{
+			ID:     42,
+			Status: hcloud.ServerStatusRunning,
+			PublicNet: hcloud.ServerPublicNet{
+				IPv4: hcloud.ServerPublicNetIPv4{
+					IP: net.ParseIP("203.0.113.10"),
+				},
+				IPv6: hcloud.ServerPublicNetIPv6{
+					IP:      net.ParseIP("2001:db8::1"),
+					Network: ipv6Net,
+				},
+			},
+			PrivateNet: []hcloud.ServerPrivateNet{
+				{
+					IP:      net.ParseIP("10.0.0.10"),
+					Aliases: []net.IP{net.ParseIP("10.0.0.11")},
+				},
+			},
+			Location:   &hcloud.Location{Name: "nbg1"},
+			Datacenter: &hcloud.Datacenter{Name: "nbg1-dc3"},
+		},
+	}
+
+	sends := res.metadataSends()
+	if sends.ServerID != 42 {
+		t.Fatalf("unexpected server id: %d", sends.ServerID)
+	}
+	if sends.Status != string(hcloud.ServerStatusRunning) {
+		t.Fatalf("unexpected status: %s", sends.Status)
+	}
+	if sends.PublicIPv4 != "203.0.113.10" {
+		t.Fatalf("unexpected public ipv4: %s", sends.PublicIPv4)
+	}
+	if sends.PublicIPv6 != "2001:db8::1" {
+		t.Fatalf("unexpected public ipv6: %s", sends.PublicIPv6)
+	}
+	if sends.PublicIPv6Network != "2001:db8::/64" {
+		t.Fatalf("unexpected public ipv6 network: %s", sends.PublicIPv6Network)
+	}
+	if !reflect.DeepEqual(sends.PrivateIPs, []string{"10.0.0.10", "10.0.0.11"}) {
+		t.Fatalf("unexpected private ips: %+v", sends.PrivateIPs)
+	}
+	if sends.Location != "nbg1" {
+		t.Fatalf("unexpected location: %s", sends.Location)
+	}
+	if sends.Datacenter != "nbg1-dc3" {
+		t.Fatalf("unexpected datacenter: %s", sends.Datacenter)
+	}
+}
+
+func TestHetznerVMSendMetadataWithoutInitUsesSendableTrait(t *testing.T) {
+	res := &HetznerVMRes{}
+
+	if err := res.sendMetadata(); err != nil {
+		t.Fatalf("sendMetadata failed: %v", err)
+	}
+
+	sends, ok := res.Sent().(*HetznerVMSends)
+	if !ok {
+		t.Fatalf("unexpected sent payload type: %T", res.Sent())
+	}
+	if sends.ServerID != 0 {
+		t.Fatalf("expected zero server id, got %d", sends.ServerID)
+	}
+	if sends.PublicIPv4 != "" || sends.PublicIPv6 != "" {
+		t.Fatalf("expected empty public ips, got %+v", sends)
+	}
+	if len(sends.PrivateIPs) != 0 {
+		t.Fatalf("expected no private ips, got %+v", sends.PrivateIPs)
 	}
 }
 
