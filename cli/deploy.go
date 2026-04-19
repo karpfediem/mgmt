@@ -85,6 +85,11 @@ type DeployArgs struct {
 	DeployLangPuppet *cliUtil.LangPuppetArgs `arg:"subcommand:langpuppet" help:"deploy langpuppet graph payload"`
 }
 
+func deployFsURI(id uint64, uniqueid uuid.UUID) string {
+	metadata := lib.MetadataPrefix + fmt.Sprintf("/deploy/%d-%s", id, uniqueid)
+	return fmt.Sprintf("%s://%s", etcdfs.Scheme, metadata)
+}
+
 // Run executes the correct subcommand. It errors if there's ever an error. It
 // returns true if we did activate one of the subcommands. It returns false if
 // we did not. This information is used so that the top-level parser can return
@@ -189,47 +194,39 @@ func (obj *DeployArgs) Run(ctx context.Context, data *cliUtil.Data) (bool, error
 
 	uniqueid := uuid.New() // panic's if it can't generate one :P
 
-	client := etcdClient.NewClientFromSeedsNamespace(
-		obj.Seeds, // endpoints
-		lib.NS,
-	)
-	if err := client.Init(); err != nil {
-		return false, errwrap.Wrapf(err, "client Init failed")
-	}
-	defer func() {
-		err := errwrap.Wrapf(client.Close(), "client Close failed")
-		if err != nil {
-			// TODO: cause the final exit code to be non-zero
-			Logf("client cleanup error: %+v", err)
-		}
-	}()
-
 	var world engine.World
-	world = &etcd.World{ // XXX: What should some of these fields be?
-		Client: client, // XXX: remove me when etcdfs below is done
-		Seeds:  obj.Seeds,
-		NS:     lib.NS,
-		//MetadataPrefix: lib.MetadataPrefix,
-		//StoragePrefix:  lib.StoragePrefix,
-		//StandaloneFs: ???.DeployFs, // used for static deploys
-		//GetURI: func() string {
-		//},
-	}
 	if obj.SSHURL != "" { // alternate world implementation over SSH
 		world = &etcdSSH.World{
-			URL:     obj.SSHURL,
-			HostKey: obj.SSHHostKey,
-			Seeds:   obj.Seeds,
-			NS:      lib.NS,
-			//MetadataPrefix: lib.MetadataPrefix,
-			//StoragePrefix:  lib.StoragePrefix,
-			//StandaloneFs: ???.DeployFs, // used for static deploys
-			//GetURI: func() string {
-			//},
+			URL:            obj.SSHURL,
+			HostKey:        obj.SSHHostKey,
+			Seeds:          obj.Seeds,
+			NS:             lib.NS,
+			MetadataPrefix: lib.MetadataPrefix,
+			StoragePrefix:  lib.StoragePrefix,
 		}
-		// XXX: We need to first get rid of the standalone etcd client,
-		// and then pull the etcdfs stuff in so it uses that client.
-		return false, fmt.Errorf("--ssh-url is not implemented yet")
+	} else {
+		client := etcdClient.NewClientFromSeedsNamespace(
+			obj.Seeds, // endpoints
+			lib.NS,
+		)
+		if err := client.Init(); err != nil {
+			return false, errwrap.Wrapf(err, "client Init failed")
+		}
+		defer func() {
+			err := errwrap.Wrapf(client.Close(), "client Close failed")
+			if err != nil {
+				// TODO: cause the final exit code to be non-zero
+				Logf("client cleanup error: %+v", err)
+			}
+		}()
+
+		world = &etcd.World{
+			Client:         client,
+			Seeds:          obj.Seeds,
+			NS:             lib.NS,
+			MetadataPrefix: lib.MetadataPrefix,
+			StoragePrefix:  lib.StoragePrefix,
+		}
 	}
 	worldInit := &engine.WorldInit{
 		Hostname: "", // XXX: Should we set this?
@@ -258,17 +255,9 @@ func (obj *DeployArgs) Run(ctx context.Context, data *cliUtil.Data) (bool, error
 	var id = max + 1 // next id
 	Logf("previous max deploy id: %d", max)
 
-	// XXX: Get this from the World API? (Which might need improving!)
-	etcdFs := &etcdfs.Fs{
-		Client: client,
-		// TODO: using a uuid is meant as a temporary measure, i hate them
-		Metadata:   lib.MetadataPrefix + fmt.Sprintf("/deploy/%d-%s", id, uniqueid),
-		DataPrefix: lib.StoragePrefix,
-
-		Debug: data.Flags.Debug,
-		Logf: func(format string, v ...interface{}) {
-			Logf("fs: "+format, v...)
-		},
+	deployFs, err := world.Fs(ctx, deployFsURI(id, uniqueid))
+	if err != nil {
+		return false, errwrap.Wrapf(err, "could not open deploy filesystem")
 	}
 
 	info := &gapi.Info{
@@ -279,7 +268,7 @@ func (obj *DeployArgs) Run(ctx context.Context, data *cliUtil.Data) (bool, error
 			//Update: obj.Update,
 		},
 
-		Fs:    etcdFs,
+		Fs:    deployFs,
 		Debug: data.Flags.Debug,
 		Logf: func(format string, v ...interface{}) {
 			// TODO: is this a sane prefix to use here?
