@@ -60,6 +60,16 @@ type hetznerServerLookupClient interface {
 	GetByName(ctx context.Context, name string) (*hcloud.Server, *hcloud.Response, error)
 }
 
+type hetznerFirewallLifecycleClient interface {
+	GetByName(ctx context.Context, name string) (*hcloud.Firewall, *hcloud.Response, error)
+	Create(ctx context.Context, opts hcloud.FirewallCreateOpts) (hcloud.FirewallCreateResult, *hcloud.Response, error)
+	Update(ctx context.Context, firewall *hcloud.Firewall, opts hcloud.FirewallUpdateOpts) (*hcloud.Firewall, *hcloud.Response, error)
+	Delete(ctx context.Context, firewall *hcloud.Firewall) (*hcloud.Response, error)
+	SetRules(ctx context.Context, firewall *hcloud.Firewall, opts hcloud.FirewallSetRulesOpts) ([]*hcloud.Action, *hcloud.Response, error)
+	ApplyResources(ctx context.Context, firewall *hcloud.Firewall, resources []hcloud.FirewallResource) ([]*hcloud.Action, *hcloud.Response, error)
+	RemoveResources(ctx context.Context, firewall *hcloud.Firewall, resources []hcloud.FirewallResource) ([]*hcloud.Action, *hcloud.Response, error)
+}
+
 type hetznerSSHKeyLookupClient interface {
 	GetByName(ctx context.Context, name string) (*hcloud.SSHKey, *hcloud.Response, error)
 	All(ctx context.Context) ([]*hcloud.SSHKey, error)
@@ -195,6 +205,14 @@ func hetznerServerByName(ctx context.Context, client hetznerServerLookupClient, 
 		return nil, err
 	}
 	return server, nil
+}
+
+func hetznerFirewallByName(ctx context.Context, client hetznerFirewallLifecycleClient, name string) (*hcloud.Firewall, error) {
+	firewall, _, err := client.GetByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return firewall, nil
 }
 
 func hetznerSSHKeyByName(ctx context.Context, client hetznerSSHKeyLifecycleClient, name string) (*hcloud.SSHKey, error) {
