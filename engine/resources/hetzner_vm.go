@@ -32,6 +32,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/purpleidea/mgmt/engine"
@@ -216,6 +217,15 @@ type HetznerVMRes struct {
 	// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html.
 	UserData string `lang:"userdata"`
 
+	// Labels manages the full Hetzner label map on the server.
+	Labels map[string]string `lang:"labels"`
+
+	// DeleteProtection prevents accidental server deletion through the API.
+	DeleteProtection bool `lang:"deleteprotection"`
+
+	// RebuildProtection prevents rebuild style actions through the API.
+	RebuildProtection bool `lang:"rebuildprotection"`
+
 	// ServerRescueMode specifies the image type used when enabling rescue mode.
 	// The supported image types are "linux32", "linux64" and "freebsd64".
 	// Alternatively, leave this string empty to disable rescue mode (default).
@@ -277,6 +287,15 @@ type HetznerVMRes struct {
 	// rescueImage is a local copy of the image type used when rescue mode was
 	// enabled the last time, to give checkapplyrescuemode a static reference.
 	rescueImage hcloud.ServerRescueType
+
+	// serverLabelClient is used for label reconciliation and may be swapped in tests.
+	serverLabelClient hetznerServerLabelClient
+
+	// serverProtectionClient is used for protection reconciliation and may be swapped in tests.
+	serverProtectionClient hetznerServerProtectionClient
+
+	// actionWaiter is used to wait for protection updates and may be swapped in tests.
+	actionWaiter hetznerActionWaiter
 }
 
 // Default returns some conservative defaults for this resource.
@@ -352,6 +371,9 @@ func (obj *HetznerVMRes) Init(init *engine.Init) error {
 		// TODO: hcloud.WithEndpoint(),
 		// TODO: hcloud.WithDebugWriter(),
 	)
+	obj.serverLabelClient = &obj.client.Server
+	obj.serverProtectionClient = &obj.client.Server
+	obj.actionWaiter = &obj.client.Action
 
 	// warn user about AllowRebuild setting
 	switch obj.AllowRebuild {
@@ -378,6 +400,9 @@ func (obj *HetznerVMRes) Init(init *engine.Init) error {
 func (obj *HetznerVMRes) Cleanup() error {
 	obj.APIToken = ""
 	obj.client = nil
+	obj.serverLabelClient = nil
+	obj.serverProtectionClient = nil
+	obj.actionWaiter = nil
 	return nil
 }
 
@@ -425,6 +450,18 @@ func (obj *HetznerVMRes) CheckApply(ctx context.Context, apply bool) (bool, erro
 	// NOTE: these changes are only applied if the server exists.
 	if c, err := obj.checkApplyServerRebuild(ctx, apply); err != nil {
 		return false, errwrap.Wrapf(err, "checkApplyServerRebuild failed")
+	} else if !c {
+		checkOK = false
+	}
+	// Labels and protection flags are intrinsic server properties and belong on
+	// the main VM resource rather than on separate relationship resources.
+	if c, err := obj.checkApplyServerLabels(ctx, apply); err != nil {
+		return false, errwrap.Wrapf(err, "checkApplyServerLabels failed")
+	} else if !c {
+		checkOK = false
+	}
+	if c, err := obj.checkApplyServerProtection(ctx, apply); err != nil {
+		return false, errwrap.Wrapf(err, "checkApplyServerProtection failed")
 	} else if !c {
 		checkOK = false
 	}
@@ -546,6 +583,52 @@ func (obj *HetznerVMRes) checkApplyServerRebuild(ctx context.Context, apply bool
 	return false, nil
 }
 
+// checkApplyServerLabels reconciles the full server label map.
+func (obj *HetznerVMRes) checkApplyServerLabels(ctx context.Context, apply bool) (bool, error) {
+	if obj.init.Debug {
+		obj.init.Logf("checkApplyServerLabels(apply: %t)", apply)
+	}
+	if obj.server == nil {
+		if obj.State == HetznerStateAbsent {
+			return true, nil
+		}
+		return false, nil
+	}
+	if maps.Equal(obj.server.Labels, obj.Labels) {
+		return true, nil
+	}
+	if !apply {
+		return false, nil
+	}
+	if err := obj.updateServerLabels(ctx, obj.Labels); err != nil {
+		return false, errwrap.Wrapf(err, "updateServerLabels failed")
+	}
+	return false, nil
+}
+
+// checkApplyServerProtection reconciles delete and rebuild protection flags.
+func (obj *HetznerVMRes) checkApplyServerProtection(ctx context.Context, apply bool) (bool, error) {
+	if obj.init.Debug {
+		obj.init.Logf("checkApplyServerProtection(apply: %t)", apply)
+	}
+	if obj.server == nil {
+		if obj.State == HetznerStateAbsent {
+			return true, nil
+		}
+		return false, nil
+	}
+	if obj.server.Protection.Delete == obj.DeleteProtection && obj.server.Protection.Rebuild == obj.RebuildProtection {
+		return true, nil
+	}
+	if !apply {
+		return false, nil
+	}
+	if err := obj.setServerProtection(ctx, obj.DeleteProtection, obj.RebuildProtection); err != nil {
+		return false, errwrap.Wrapf(err, "setServerProtection failed")
+	}
+	return false, nil
+}
+
 // checkApplyRescueMode checks if the rescue mode is enabled (or disabled) as
 // intended, and tries to disable (or enable) the rescue mode if needed to meet
 // the specified parameters. When enabling rescue mode, the SSH keys specified
@@ -654,6 +737,15 @@ func (obj *HetznerVMRes) Cmp(r engine.Res) error {
 	}
 	if obj.UserData != res.UserData {
 		return fmt.Errorf("userdata differs")
+	}
+	if !maps.Equal(obj.Labels, res.Labels) {
+		return fmt.Errorf("labels differ")
+	}
+	if obj.DeleteProtection != res.DeleteProtection {
+		return fmt.Errorf("deleteprotection differs")
+	}
+	if obj.RebuildProtection != res.RebuildProtection {
+		return fmt.Errorf("rebuildprotection differs")
 	}
 	if obj.ServerRescueMode != res.ServerRescueMode {
 		return fmt.Errorf("serverrescuemode differs")
@@ -780,6 +872,11 @@ func (obj *HetznerVMRes) deleteServer(ctx context.Context) error {
 	if obj.server == nil {
 		return fmt.Errorf("server is already unavailable")
 	}
+	if obj.server.Protection.Delete {
+		if err := obj.setServerProtection(ctx, false, obj.server.Protection.Rebuild); err != nil {
+			return errwrap.Wrapf(err, "disable delete protection failed")
+		}
+	}
 	if _, err := obj.client.Server.Delete(ctx, obj.server); err != nil {
 		return errwrap.Wrapf(err, "client.server.delete failed")
 	}
@@ -902,7 +999,7 @@ func (obj *HetznerVMRes) getServerConfig(ctx context.Context) error {
 		Datacenter:       datacenter,        // *Datacenter
 		UserData:         obj.UserData,      // string
 		StartAfterCreate: &startAfterCreate, // *bool
-		Labels:           nil,               // map[string]string
+		Labels:           obj.Labels,        // map[string]string
 		Automount:        &automount,        // *bool
 		Volumes:          nil,               // []*Volume
 		Networks:         nil,               // []*Network
@@ -913,6 +1010,37 @@ func (obj *HetznerVMRes) getServerConfig(ctx context.Context) error {
 	// TODO: add tests? If issues come up, add checks to Validate.
 	if err := hcloud.ServerCreateOpts.Validate(obj.serverconfig); err != nil {
 		return errwrap.Wrapf(err, "invalid serverconfig")
+	}
+	return nil
+}
+
+// updateServerLabels reconciles the full server label map through the update API.
+func (obj *HetznerVMRes) updateServerLabels(ctx context.Context, labels map[string]string) error {
+	if obj.server == nil {
+		return fmt.Errorf("server is unavailable")
+	}
+	if _, _, err := obj.serverLabelClient.Update(ctx, obj.server, hcloud.ServerUpdateOpts{
+		Labels: labels,
+	}); err != nil {
+		return errwrap.Wrapf(err, "server update failed")
+	}
+	return nil
+}
+
+// setServerProtection reconciles delete and rebuild protection through the API.
+func (obj *HetznerVMRes) setServerProtection(ctx context.Context, deleteProtection bool, rebuildProtection bool) error {
+	if obj.server == nil {
+		return fmt.Errorf("server is unavailable")
+	}
+	action, _, err := obj.serverProtectionClient.ChangeProtection(ctx, obj.server, hcloud.ServerChangeProtectionOpts{
+		Delete:  &deleteProtection,
+		Rebuild: &rebuildProtection,
+	})
+	if err != nil {
+		return errwrap.Wrapf(err, "server change protection failed")
+	}
+	if err := hetznerWaitForAction(ctx, obj.WaitTimeout, obj.actionWaiter, action); err != nil {
+		return errwrap.Wrapf(err, "wait for server protection action failed")
 	}
 	return nil
 }
