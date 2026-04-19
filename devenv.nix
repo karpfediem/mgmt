@@ -37,4 +37,7 @@ in
     "${libvirt}/share/pkgconfig"
   ];
   env.LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [ libxml2 augeas libvirt ];
+  # This repo intentionally ignores vendor/, so the shell must not inherit a
+  # global go env such as GOFLAGS=-mod=vendor.
+  env.GOFLAGS = "-mod=mod";
 }
