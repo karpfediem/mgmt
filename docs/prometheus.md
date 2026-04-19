@@ -27,7 +27,7 @@ mgmt exposes etcd metrics. Read more in the [upstream documentation][etcdm]
 
 Here is a list of the metrics we provide:
 
-- `mgmt_resources_total`: The number of resources that mgmt is managing
+- `mgmt_resources`: The number of resources that mgmt is managing
 - `mgmt_checkapply_total`: The number of CheckApply's that mgmt has run
 - `mgmt_failures_total`: The number of resources that have failed
 - `mgmt_failures`: The number of resources that have failed
@@ -37,6 +37,10 @@ epoch in seconds
 For each metric, you will get some extra labels:
 
 - `kind`: The kind of mgmt resource
+
+For `mgmt_failures_total` and `mgmt_failures`, those extra labels are set:
+
+- `failure`: "soft" or "hard", depending on the failure type
 
 For `mgmt_checkapply_total`, those extra labels are set:
 
@@ -52,7 +56,14 @@ Patches welcome!
 
 ## Grafana
 
-We do not have grafana dashboards yet. Patches welcome!
+We have a grafana dashboard in `modules/grafana/files/mgmt-prometheus-overview.json`.
+If you use the grafana module with a prometheus datasource, you can provision
+this dashboard with the `dashboards` option. You can also add your own
+dashboards there, and optionally set `dashboard_folder` to change the grafana
+folder name. Each dashboard entry is a struct with `name` and `content`, and
+the `prometheus_dashboard()` helper builds that shape. The
+`mgmt_prometheus_overview_dashboard()` helper returns the built-in example.
+Patches welcome!
 
 ## External resources
 

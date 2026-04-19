@@ -1,6 +1,17 @@
 import "deploy"
 import "golang"
 
+func prometheus_dashboard($name, $content) {
+	struct{
+		name => $name,
+		content => $content,
+	}
+}
+
+func mgmt_prometheus_overview_dashboard() {
+	prometheus_dashboard("prometheus-overview", deploy.readfile("/files/mgmt-prometheus-overview.json"))
+}
+
 class server() {
 	pkg "grafana" { # on fedora
 		state => "installed",
@@ -63,12 +74,67 @@ class server:prometheus_base() {
 	}
 }
 
+class server:dashboard_base($name, $folder) {
+
+	file "/etc/grafana/provisioning/dashboards/" {
+		state => $const.res.file.state.exists,
+		recurse => true,
+		purge => true,
+		owner => "root",
+		group => "grafana",
+		mode => "u=rwx,g=rx,o=", # dir
+	}
+
+	file "/var/lib/grafana/dashboards/" {
+		state => $const.res.file.state.exists,
+		owner => "grafana",
+		group => "grafana",
+		mode => "u=rwx,g=rx,o=", # dir
+	}
+
+	file "/var/lib/grafana/dashboards/${name}/" {
+		state => $const.res.file.state.exists,
+		recurse => true,
+		purge => true,
+		owner => "grafana",
+		group => "grafana",
+		mode => "u=rwx,g=rx,o=", # dir
+	}
+
+	$tmpl = struct{
+		name => "${name}",
+		folder => "${folder}",
+		path => "/var/lib/grafana/dashboards/${name}",
+	}
+	file "/etc/grafana/provisioning/dashboards/${name}.yaml" {
+		state => $const.res.file.state.exists,
+		content => golang.template(deploy.readfile("/files/dashboards.yaml"), $tmpl),
+		owner => "root",
+		group => "grafana",
+		mode => "u=rw,g=r,o=",
+	}
+}
+
+class server:dashboard($name, $dashboard) {
+	$dashboard_name = $dashboard->name
+	file "/var/lib/grafana/dashboards/${name}/${dashboard_name}.json" {
+		state => $const.res.file.state.exists,
+		content => $dashboard->content,
+		owner => "grafana",
+		group => "grafana",
+		mode => "u=rw,g=r,o=",
+	}
+}
+
 # XXX: if selinux is enabled, this wasn't connecting!
 class server:prometheus($name, $st) {
 	include prometheus_base
 
 	$url = $st->url || "http://localhost:9090"
 	$comment = $st->comment || ""
+	$dashboard_folder = $st->dashboard_folder || $name
+	# optional list of dashboards, eg: [prometheus_dashboard("custom", deploy.readfile("/files/custom.json")),]
+	$dashboards []struct{name str; content str} = $st->dashboards || []
 
 	$tmpl = struct{
 		name => "${name}",
@@ -81,5 +147,13 @@ class server:prometheus($name, $st) {
 		owner => "root",
 		group => "grafana",
 		mode => "u=rw,g=r,o=",
+	}
+
+	if $dashboards != [] {
+		include dashboard_base($name, $dashboard_folder)
+	}
+
+	for $index, $dashboard in $dashboards {
+		include dashboard($name, $dashboard)
 	}
 }
