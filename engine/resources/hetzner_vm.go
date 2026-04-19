@@ -133,8 +133,8 @@ func init() {
 // local mcl struct, and does not exist as server instance on Hetzner's side.
 // NOTE: the Hetzner cloud console must be used to create a new project,
 // generate the corresponding API token, and initialize the desired SSH keys.
-// All registered SSH keys are used when creating a server, and a subset of
-// those can be enabled for rescue mode via the "serverrescuekeys" param.
+// Server creation uses the keys listed in the "sshkeys" param, or all project
+// SSH keys by default, while rescue mode uses the "serverrescuekeys" subset.
 // NOTE: complete and up-to-date serverconfig options must be requested from the
 // Hetzner API, but hcloud-go-getopts (3) provides a static reference.
 // NOTE: this resources requires polling, via the "Meta:poll" param. The Hetzner
@@ -217,6 +217,13 @@ type HetznerVMRes struct {
 	// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html.
 	UserData string `lang:"userdata"`
 
+	// SSHKeys selects which project SSH keys should be injected when creating
+	// or rebuilding the server. If empty, all project SSH keys are injected,
+	// which preserves the current behaviour. Because the Hetzner server API
+	// does not expose the injected key set afterwards, changes to this field
+	// only take effect on future create or rebuild operations.
+	SSHKeys []string `lang:"sshkeys"`
+
 	// Labels manages the full Hetzner label map on the server.
 	Labels map[string]string `lang:"labels"`
 
@@ -294,6 +301,9 @@ type HetznerVMRes struct {
 	// serverProtectionClient is used for protection reconciliation and may be swapped in tests.
 	serverProtectionClient hetznerServerProtectionClient
 
+	// sshKeyClient is used for server creation and rescue mode SSH key lookup.
+	sshKeyClient hetznerSSHKeyLookupClient
+
 	// actionWaiter is used to wait for protection updates and may be swapped in tests.
 	actionWaiter hetznerActionWaiter
 }
@@ -345,6 +355,16 @@ func (obj *HetznerVMRes) Validate() error {
 	default:
 		return fmt.Errorf("invalid serverrescuemode: %s", obj.ServerRescueMode)
 	}
+	for i, key := range obj.SSHKeys {
+		if key == "" {
+			return fmt.Errorf("empty sshkeys[%d]", i)
+		}
+	}
+	for i, key := range obj.ServerRescueSSHKeys {
+		if key == "" {
+			return fmt.Errorf("empty serverrescuekeys[%d]", i)
+		}
+	}
 
 	// validate time params
 	if obj.MetaParams().Poll < HetznerPollLimit {
@@ -373,6 +393,7 @@ func (obj *HetznerVMRes) Init(init *engine.Init) error {
 	)
 	obj.serverLabelClient = &obj.client.Server
 	obj.serverProtectionClient = &obj.client.Server
+	obj.sshKeyClient = &obj.client.SSHKey
 	obj.actionWaiter = &obj.client.Action
 
 	// warn user about AllowRebuild setting
@@ -402,6 +423,7 @@ func (obj *HetznerVMRes) Cleanup() error {
 	obj.client = nil
 	obj.serverLabelClient = nil
 	obj.serverProtectionClient = nil
+	obj.sshKeyClient = nil
 	obj.actionWaiter = nil
 	return nil
 }
@@ -738,6 +760,9 @@ func (obj *HetznerVMRes) Cmp(r engine.Res) error {
 	if obj.UserData != res.UserData {
 		return fmt.Errorf("userdata differs")
 	}
+	if !hetznerStringListsEqual(obj.SSHKeys, res.SSHKeys) {
+		return fmt.Errorf("sshkeys differ")
+	}
 	if !maps.Equal(obj.Labels, res.Labels) {
 		return fmt.Errorf("labels differ")
 	}
@@ -750,11 +775,8 @@ func (obj *HetznerVMRes) Cmp(r engine.Res) error {
 	if obj.ServerRescueMode != res.ServerRescueMode {
 		return fmt.Errorf("serverrescuemode differs")
 	}
-	// TODO: more robust comparison of keylists
-	for i, key := range obj.ServerRescueSSHKeys {
-		if key != res.ServerRescueSSHKeys[i] {
-			return fmt.Errorf("serverrescuekeys differ")
-		}
+	if !hetznerStringListsEqual(obj.ServerRescueSSHKeys, res.ServerRescueSSHKeys) {
+		return fmt.Errorf("serverrescuekeys differ")
 	}
 	if obj.WaitInterval != res.WaitInterval {
 		return fmt.Errorf("waitinterval differs")
@@ -974,8 +996,7 @@ func (obj *HetznerVMRes) getServerConfig(ctx context.Context) error {
 	if err != nil {
 		return errwrap.Wrapf(err, "failed to collect Datacenter struct")
 	}
-	// TODO: add more flexible key selection
-	keylist, err := obj.client.SSHKey.All(ctx)
+	keylist, err := obj.getServerCreateKeys(ctx)
 	if err != nil {
 		return errwrap.Wrapf(err, "failed to collect SSHKey array")
 	}
@@ -1012,6 +1033,34 @@ func (obj *HetznerVMRes) getServerConfig(ctx context.Context) error {
 		return errwrap.Wrapf(err, "invalid serverconfig")
 	}
 	return nil
+}
+
+func (obj *HetznerVMRes) getServerCreateKeys(ctx context.Context) ([]*hcloud.SSHKey, error) {
+	if obj.init.Debug {
+		obj.init.Logf("getServerCreateKeys()")
+	}
+	if len(obj.SSHKeys) == 0 {
+		keylist, err := obj.sshKeyClient.All(ctx)
+		if err != nil {
+			return nil, errwrap.Wrapf(err, "SSHKey.All failed")
+		}
+		return keylist, nil
+	}
+	keylist := make([]*hcloud.SSHKey, 0, len(obj.SSHKeys))
+	for _, keyname := range obj.SSHKeys {
+		key, _, err := obj.sshKeyClient.GetByName(ctx, keyname)
+		if err != nil {
+			return nil, errwrap.Wrapf(err, "SSHKey GetByName(%s) failed", keyname)
+		}
+		if key == nil {
+			return nil, fmt.Errorf("unknown keyname: %s", keyname)
+		}
+		if obj.init.Debug {
+			obj.init.Logf("appending known server create key: %s", keyname)
+		}
+		keylist = append(keylist, key)
+	}
+	return keylist, nil
 }
 
 // updateServerLabels reconciles the full server label map through the update API.
@@ -1144,7 +1193,7 @@ func (obj *HetznerVMRes) getRescueKeys(ctx context.Context) error {
 	}
 	var keylist []*hcloud.SSHKey
 	for _, keyname := range obj.ServerRescueSSHKeys {
-		key, _, err := obj.client.SSHKey.GetByName(ctx, keyname)
+		key, _, err := obj.sshKeyClient.GetByName(ctx, keyname)
 		if err != nil {
 			return errwrap.Wrapf(err, "SSHKey GetByName(%s) failed", keyname)
 		}

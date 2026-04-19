@@ -47,6 +47,29 @@ func (obj *fakeHetznerServerProtectionUpdateClient) ChangeProtection(_ context.C
 	return &hcloud.Action{ID: 5000 + int64(len(obj.changeProtectionCalls)), Status: hcloud.ActionStatusSuccess}, nil, obj.err
 }
 
+type fakeHetznerSSHKeyLookupClient struct {
+	keys map[string]*hcloud.SSHKey
+	err  error
+}
+
+func (obj *fakeHetznerSSHKeyLookupClient) GetByName(_ context.Context, name string) (*hcloud.SSHKey, *hcloud.Response, error) {
+	if obj.err != nil {
+		return nil, nil, obj.err
+	}
+	return obj.keys[name], nil, nil
+}
+
+func (obj *fakeHetznerSSHKeyLookupClient) All(_ context.Context) ([]*hcloud.SSHKey, error) {
+	if obj.err != nil {
+		return nil, obj.err
+	}
+	out := make([]*hcloud.SSHKey, 0, len(obj.keys))
+	for _, key := range obj.keys {
+		out = append(out, key)
+	}
+	return out, nil
+}
+
 func TestHetznerVMCheckApplyServerLabels(t *testing.T) {
 	serverLabelClient := &fakeHetznerServerLabelUpdateClient{}
 	res := &HetznerVMRes{
@@ -115,11 +138,16 @@ func TestHetznerVMCmpIgnoresLabelOrder(t *testing.T) {
 		ServerType:        "cx23",
 		Datacenter:        "nbg1-dc3",
 		Image:             "debian-13",
+		SSHKeys:           []string{"beta-admin", "beta-breakglass"},
 		Labels:            map[string]string{"cluster": "beta", "role": "cdn"},
 		DeleteProtection:  true,
 		RebuildProtection: true,
-		WaitInterval:      HetznerWaitIntervalDefault,
-		WaitTimeout:       HetznerWaitTimeoutDefault,
+		ServerRescueSSHKeys: []string{
+			"beta-breakglass",
+			"beta-admin",
+		},
+		WaitInterval: HetznerWaitIntervalDefault,
+		WaitTimeout:  HetznerWaitTimeoutDefault,
 	}
 	right := &HetznerVMRes{
 		APIToken:          "token",
@@ -128,14 +156,45 @@ func TestHetznerVMCmpIgnoresLabelOrder(t *testing.T) {
 		ServerType:        "cx23",
 		Datacenter:        "nbg1-dc3",
 		Image:             "debian-13",
+		SSHKeys:           []string{"beta-breakglass", "beta-admin"},
 		Labels:            map[string]string{"role": "cdn", "cluster": "beta"},
 		DeleteProtection:  true,
 		RebuildProtection: true,
-		WaitInterval:      HetznerWaitIntervalDefault,
-		WaitTimeout:       HetznerWaitTimeoutDefault,
+		ServerRescueSSHKeys: []string{
+			"beta-admin",
+			"beta-breakglass",
+		},
+		WaitInterval: HetznerWaitIntervalDefault,
+		WaitTimeout:  HetznerWaitTimeoutDefault,
 	}
 	if err := left.Cmp(right); err != nil {
 		t.Fatalf("Cmp failed: %v", err)
+	}
+}
+
+func TestHetznerVMGetServerCreateKeysUsesNamedSubset(t *testing.T) {
+	sshKeyClient := &fakeHetznerSSHKeyLookupClient{
+		keys: map[string]*hcloud.SSHKey{
+			"beta-admin":      {ID: 1, Name: "beta-admin"},
+			"beta-breakglass": {ID: 2, Name: "beta-breakglass"},
+			"ignored":         {ID: 3, Name: "ignored"},
+		},
+	}
+	res := &HetznerVMRes{
+		SSHKeys:      []string{"beta-admin", "beta-breakglass"},
+		init:         testInit(),
+		sshKeyClient: sshKeyClient,
+	}
+
+	keys, err := res.getServerCreateKeys(context.Background())
+	if err != nil {
+		t.Fatalf("getServerCreateKeys failed: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("expected two keys, got %d", len(keys))
+	}
+	if keys[0].Name != "beta-admin" || keys[1].Name != "beta-breakglass" {
+		t.Fatalf("unexpected key order: %+v", keys)
 	}
 }
 

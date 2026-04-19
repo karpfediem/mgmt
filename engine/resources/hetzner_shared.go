@@ -60,6 +60,18 @@ type hetznerServerLookupClient interface {
 	GetByName(ctx context.Context, name string) (*hcloud.Server, *hcloud.Response, error)
 }
 
+type hetznerSSHKeyLookupClient interface {
+	GetByName(ctx context.Context, name string) (*hcloud.SSHKey, *hcloud.Response, error)
+	All(ctx context.Context) ([]*hcloud.SSHKey, error)
+}
+
+type hetznerSSHKeyLifecycleClient interface {
+	GetByName(ctx context.Context, name string) (*hcloud.SSHKey, *hcloud.Response, error)
+	Create(ctx context.Context, opts hcloud.SSHKeyCreateOpts) (*hcloud.SSHKey, *hcloud.Response, error)
+	Update(ctx context.Context, sshKey *hcloud.SSHKey, opts hcloud.SSHKeyUpdateOpts) (*hcloud.SSHKey, *hcloud.Response, error)
+	Delete(ctx context.Context, sshKey *hcloud.SSHKey) (*hcloud.Response, error)
+}
+
 type hetznerServerLabelClient interface {
 	GetByName(ctx context.Context, name string) (*hcloud.Server, *hcloud.Response, error)
 	Update(ctx context.Context, server *hcloud.Server, opts hcloud.ServerUpdateOpts) (*hcloud.Server, *hcloud.Response, error)
@@ -183,6 +195,14 @@ func hetznerServerByName(ctx context.Context, client hetznerServerLookupClient, 
 		return nil, err
 	}
 	return server, nil
+}
+
+func hetznerSSHKeyByName(ctx context.Context, client hetznerSSHKeyLifecycleClient, name string) (*hcloud.SSHKey, error) {
+	sshKey, _, err := client.GetByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return sshKey, nil
 }
 
 func hetznerNetworkByName(ctx context.Context, client hetznerNetworkLookupClient, name string) (*hcloud.Network, error) {
