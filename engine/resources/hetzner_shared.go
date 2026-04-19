@@ -60,6 +60,16 @@ type hetznerServerLookupClient interface {
 	GetByName(ctx context.Context, name string) (*hcloud.Server, *hcloud.Response, error)
 }
 
+type hetznerServerLabelClient interface {
+	GetByName(ctx context.Context, name string) (*hcloud.Server, *hcloud.Response, error)
+	Update(ctx context.Context, server *hcloud.Server, opts hcloud.ServerUpdateOpts) (*hcloud.Server, *hcloud.Response, error)
+}
+
+type hetznerServerProtectionClient interface {
+	GetByName(ctx context.Context, name string) (*hcloud.Server, *hcloud.Response, error)
+	ChangeProtection(ctx context.Context, server *hcloud.Server, opts hcloud.ServerChangeProtectionOpts) (*hcloud.Action, *hcloud.Response, error)
+}
+
 type hetznerNetworkLookupClient interface {
 	GetByName(ctx context.Context, name string) (*hcloud.Network, *hcloud.Response, error)
 }
