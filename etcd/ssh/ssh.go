@@ -368,16 +368,25 @@ func (obj *World) Connect(ctx context.Context, init *engine.WorldInit) error {
 	if err != nil {
 		return err
 	}
+	alias := u.Hostname()
+	configValues := obj.sshConfigValues(alias)
 	user := defaultUser
 	if s := u.User.Username(); s != "" {
 		user = s
+	} else if s := configValues.User; s != "" {
+		user = s
 	}
-	hostname := u.Hostname()
+	hostname := alias
+	if s := configValues.HostName; s != "" {
+		hostname = s
+	}
 	if hostname == "" {
 		return fmt.Errorf("empty hostname")
 	}
 	port := strconv.Itoa(int(defaultSSHPort)) // default
 	if s := u.Port(); s != "" {
+		port = s
+	} else if s := configValues.Port; s != "" {
 		port = s
 	}
 
@@ -421,6 +430,30 @@ func (obj *World) Connect(ctx context.Context, init *engine.WorldInit) error {
 		typ := signer.PublicKey().Type()
 		keyTypes = append(keyTypes, typ)
 		auths = append(auths, ssh.PublicKeys(signer)) // add one
+	}
+
+	if len(auths) == 0 && len(configValues.IdentityFiles) > 0 {
+		for _, identityFile := range configValues.IdentityFiles {
+			p, err := util.ExpandHome(identityFile)
+			if err != nil {
+				if obj.init.Debug {
+					obj.init.Logf("ssh config identity ignored: %v", err)
+				}
+				continue
+			}
+
+			signer, err := obj.keySigner(p)
+			if err != nil {
+				if obj.init.Debug {
+					obj.init.Logf("%s", err)
+				}
+				continue
+			}
+
+			typ := signer.PublicKey().Type()
+			keyTypes = append(keyTypes, typ)
+			auths = append(auths, ssh.PublicKeys(signer))
+		}
 	}
 
 	if len(auths) == 0 {
