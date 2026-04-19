@@ -67,6 +67,7 @@ class service_file($path, $st) {
 	$exec str = $st->exec # required
 	$ssh_url = $st->ssh_url || "" # optional
 	$ssh_hostkey = $st->ssh_hostkey || "" # optional
+	$ssh_id = $st->ssh_id || "" # optional
 	$seeds []str = $st->seeds # required
 
 	# join them all together, use the arg multiple times...
@@ -76,6 +77,7 @@ class service_file($path, $st) {
 		exec => $exec,
 		ssh_url => $ssh_url,
 		ssh_hostkey => $ssh_hostkey,
+		ssh_id => $ssh_id,
 		#seeds => $seeds,
 		valid_seeds => $valid_seeds,
 	}
@@ -108,6 +110,7 @@ class master($st) {
 	$seeds []str = $st->seeds # required
 	$ssh_url = $st->ssh_url || "" # optional
 	$ssh_hostkey = $st->ssh_hostkey || "" # optional
+	$ssh_id = $st->ssh_id || "" # optional
 
 	# 1) package repo
 	include misc.yum_repo("mgmt", struct{
@@ -134,6 +137,7 @@ class master($st) {
 		exec => "/usr/bin/mgmt",
 		ssh_url => $ssh_url,
 		ssh_hostkey => $ssh_hostkey,
+		ssh_id => $ssh_id,
 		seeds => $seeds,
 	})
 

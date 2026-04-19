@@ -166,6 +166,10 @@ type Config struct {
 	// is specified, then it overrides looking for it in the URL.
 	SSHHostKey string `arg:"--ssh-hostkey" help:"use this ssh known hosts key when connecting over SSH"`
 
+	// SSHID is the path to a specific SSH private key to use when connecting
+	// over SSH. If this is empty, mgmt scans ~/.ssh/id_* as before.
+	SSHID string `arg:"--ssh-id" help:"use this SSH private key when connecting over SSH"`
+
 	// Seeds are the list of default etcd client endpoints. If empty, it
 	// will startup a new server.
 	Seeds []string `arg:"--seeds,separate,env:MGMT_SEEDS" help:"default etcd client endpoints"`
@@ -697,6 +701,7 @@ func (obj *Main) Run(ctx context.Context) error {
 		world = &etcdSSH.World{
 			URL:            obj.SSHURL,
 			HostKey:        obj.SSHHostKey,
+			SSHID:          obj.SSHID,
 			Seeds:          obj.Seeds,
 			NS:             NS,
 			MetadataPrefix: MetadataPrefix,

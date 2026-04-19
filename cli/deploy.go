@@ -69,6 +69,10 @@ type DeployArgs struct {
 	// is specified, then it overrides looking for it in the URL.
 	SSHHostKey string `arg:"--ssh-hostkey" help:"use this ssh known hosts key when connecting over SSH"`
 
+	// SSHID is the path to a specific SSH private key to use when connecting
+	// over SSH. If this is empty, mgmt scans ~/.ssh/id_* as before.
+	SSHID string `arg:"--ssh-id" help:"use this SSH private key when connecting over SSH"`
+
 	Seeds []string `arg:"--seeds,separate,env:MGMT_SEEDS" help:"default etcd client endpoints"`
 	Noop  bool     `arg:"--noop" help:"globally force all resources into no-op mode"`
 	Sema  int      `arg:"--sema" default:"-1" help:"globally add a semaphore to all resources with this lock count"`
@@ -199,6 +203,7 @@ func (obj *DeployArgs) Run(ctx context.Context, data *cliUtil.Data) (bool, error
 		world = &etcdSSH.World{
 			URL:            obj.SSHURL,
 			HostKey:        obj.SSHHostKey,
+			SSHID:          obj.SSHID,
 			Seeds:          obj.Seeds,
 			NS:             lib.NS,
 			MetadataPrefix: lib.MetadataPrefix,

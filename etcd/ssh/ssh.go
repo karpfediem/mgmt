@@ -136,7 +136,9 @@ func (obj *World) keySigners() ([]ssh.Signer, error) {
 
 		signer, err := obj.keySigner(p)
 		if err != nil {
-			obj.init.Logf("%s", err)
+			if obj.init.Debug {
+				obj.init.Logf("%s", err)
+			}
 			continue
 		}
 
