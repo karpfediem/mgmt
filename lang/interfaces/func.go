@@ -32,6 +32,7 @@ package interfaces
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	docsUtil "github.com/purpleidea/mgmt/docs/util"
@@ -399,6 +400,34 @@ type FuncEdge struct {
 // property to be a valid pgraph.Edge.
 func (obj *FuncEdge) String() string {
 	return strings.Join(obj.Args, ", ")
+}
+
+// AddMergedFuncEdge adds a FuncEdge to a pgraph and merges arg names when the
+// source and destination already share an existing FuncEdge.
+func AddMergedFuncEdge(graph *pgraph.Graph, f1, f2 Func, args ...string) {
+	if len(args) == 0 {
+		panic("missing func edge args")
+	}
+
+	if edge, ok := graph.FindEdge(f1, f2).(*FuncEdge); ok && edge != nil {
+		argSet := make(map[string]struct{}, len(edge.Args)+len(args))
+		for _, arg := range edge.Args {
+			argSet[arg] = struct{}{}
+		}
+		for _, arg := range args {
+			argSet[arg] = struct{}{}
+		}
+
+		newArgs := make([]string, 0, len(argSet))
+		for arg := range argSet {
+			newArgs = append(newArgs, arg)
+		}
+		sort.Strings(newArgs)
+		edge.Args = newArgs
+		return
+	}
+
+	graph.AddEdge(f1, f2, &FuncEdge{Args: append([]string{}, args...)})
 }
 
 // GraphAPI is a subset of the available graph operations that are possible on a

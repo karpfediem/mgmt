@@ -3552,9 +3552,7 @@ func (obj *StmtIf) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		Else: obj.ElseBranch,
 	}
 	graph.AddVertex(stmtIfFunc)
-	graph.AddEdge(obj.conditionPtr, stmtIfFunc, &interfaces.FuncEdge{
-		Args: []string{edgeName},
-	})
+	interfaces.AddMergedFuncEdge(graph, obj.conditionPtr, stmtIfFunc, edgeName)
 
 	return graph, nil
 }
@@ -4069,9 +4067,7 @@ func (obj *StmtFor) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		//OutputVertex: ???,
 	}
 	graph.AddVertex(forFunc)
-	graph.AddEdge(f, forFunc, &interfaces.FuncEdge{
-		Args: []string{edgeName},
-	})
+	interfaces.AddMergedFuncEdge(graph, f, forFunc, edgeName)
 
 	return graph, nil
 }
@@ -4576,9 +4572,7 @@ func (obj *StmtForKV) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		//OutputVertex: ???,
 	}
 	graph.AddVertex(forKVFunc)
-	graph.AddEdge(f, forKVFunc, &interfaces.FuncEdge{
-		Args: []string{edgeName},
-	})
+	interfaces.AddMergedFuncEdge(graph, f, forKVFunc, edgeName)
 
 	return graph, nil
 }
@@ -8328,9 +8322,8 @@ func (obj *ExprList) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func,
 		}
 		graph.AddGraph(g)
 
-		fieldName := strconv.Itoa(index) // argNames as integers!
-		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // element -> list
+		fieldName := strconv.Itoa(index)                            // argNames as integers!
+		interfaces.AddMergedFuncEdge(graph, f, function, fieldName) // element -> list
 	}
 
 	return graph, function, nil
@@ -8843,9 +8836,8 @@ func (obj *ExprMap) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func, 
 		graph.AddGraph(g)
 
 		// do the key names ever change? -- yes
-		fieldName := "key:" + strconv.Itoa(index) // stringify map key
-		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // key -> map
+		fieldName := "key:" + strconv.Itoa(index)                   // stringify map key
+		interfaces.AddMergedFuncEdge(graph, f, function, fieldName) // key -> map
 	}
 
 	// each map key value pair needs to point to the final map expression
@@ -8856,9 +8848,8 @@ func (obj *ExprMap) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func, 
 		}
 		graph.AddGraph(g)
 
-		fieldName := "val:" + strconv.Itoa(index) // stringify map val
-		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // val -> map
+		fieldName := "val:" + strconv.Itoa(index)                   // stringify map val
+		interfaces.AddMergedFuncEdge(graph, f, function, fieldName) // val -> map
 	}
 
 	return graph, function, nil
@@ -9294,8 +9285,7 @@ func (obj *ExprStruct) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Fun
 		graph.AddGraph(g)
 
 		fieldName := x.Name
-		edge := &interfaces.FuncEdge{Args: []string{fieldName}}
-		graph.AddEdge(f, function, edge) // field -> struct
+		interfaces.AddMergedFuncEdge(graph, f, function, fieldName) // field -> struct
 	}
 
 	return graph, function, nil
@@ -11200,13 +11190,9 @@ func (obj *ExprCall) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func,
 	}
 	graph.AddVertex(callFunc)
 
-	graph.AddEdge(funcValueFunc, callFunc, &interfaces.FuncEdge{
-		Args: []string{edgeName},
-	})
+	interfaces.AddMergedFuncEdge(graph, funcValueFunc, callFunc, edgeName)
 
-	graph.AddEdge(callFunc, callSubgraphOutput, &interfaces.FuncEdge{
-		Args: []string{edgeNameDummy},
-	})
+	interfaces.AddMergedFuncEdge(graph, callFunc, callSubgraphOutput, edgeNameDummy)
 
 	return graph, callSubgraphOutput, nil
 }
@@ -12960,12 +12946,9 @@ func (obj *ExprIf) Graph(env *interfaces.Env) (*pgraph.Graph, interfaces.Func, e
 	}
 	graph.AddVertex(function)
 
-	edge := &interfaces.FuncEdge{Args: []string{edgeName}}
-	graph.AddEdge(f, function, edge) // condition -> exprif
+	interfaces.AddMergedFuncEdge(graph, f, function, edgeName) // condition -> exprif
 
-	graph.AddEdge(function, exprIfSubgraphOutput, &interfaces.FuncEdge{
-		Args: []string{edgeNameDummy},
-	})
+	interfaces.AddMergedFuncEdge(graph, function, exprIfSubgraphOutput, edgeNameDummy)
 
 	return graph, exprIfSubgraphOutput, nil
 }

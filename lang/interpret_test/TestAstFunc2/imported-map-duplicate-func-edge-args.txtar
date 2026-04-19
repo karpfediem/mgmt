@@ -1,0 +1,46 @@
+-- metadata.yaml --
+main: main.mcl
+path: modules/
+license: GPLv3+
+-- main.mcl --
+# This MRE exercises an imported nested class that returns a map whose values
+# reuse the same upstream $cluster-derived function.
+#
+# Broken case:
+# The function engine starts, but the composite map node stays incomplete,
+# verbose logs show `edge skip: ... composite: map{str: str}`, no first table
+# is emitted, and the test later force-unblocks waiting for a stream event.
+#
+# Fixed case:
+# The duplicate logical args are merged onto one FuncEdge, the first table is
+# emitted, interpretation continues, and the output graph contains msg[cluster-labels].
+import "modules/lib/cluster-labels/" as cluster_labels
+
+include cluster_labels.catalog(struct {
+	cluster => "beta",
+}) as labels
+include labels.labels as cluster_labels_out
+
+msg "cluster-labels" {
+	body => "imported cluster label map",
+	priority => "Info",
+	fields => $cluster_labels_out.values,
+}
+-- modules/lib/cluster-labels/metadata.yaml --
+main: main.mcl
+license: GPLv3+
+-- modules/lib/cluster-labels/main.mcl --
+class catalog($st) {
+	$cluster str = $st->cluster || "beta"
+	$cluster_copy = $cluster
+}
+
+class catalog:labels {
+	$values = {
+		# These two entries intentionally share the same upstream source.
+		"primary" => $cluster,
+		"secondary" => $cluster_copy,
+	}
+}
+-- OUTPUT --
+Vertex: msg[cluster-labels]
