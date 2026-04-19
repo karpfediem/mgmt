@@ -84,7 +84,7 @@ func (obj *HetznerVMNetworkRes) Validate() error {
 	if obj.APIToken == "" {
 		return fmt.Errorf("empty token string")
 	}
-	if err := validateHetznerAttachmentState(obj.State); err != nil {
+	if err := validateHetznerState(obj.State); err != nil {
 		return err
 	}
 	if obj.Server == "" {
