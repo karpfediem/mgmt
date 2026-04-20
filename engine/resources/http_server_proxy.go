@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -106,6 +107,10 @@ type HTTPServerProxyRes struct {
 	// overrides the Name var if specified.
 	Path string `lang:"path" yaml:"path"`
 
+	// Host optionally restricts this proxy to requests with a matching host
+	// header. The comparison ignores case and strips an incoming port suffix.
+	Host string `lang:"host" yaml:"host"`
+
 	// Sub is the string to remove from the start of the request, the path
 	// of which is looking at the Name/Path field to see if it matches. If
 	// it matches, it then translates to the destination server by removing
@@ -150,6 +155,20 @@ func (obj *HTTPServerProxyRes) getPath() string {
 		return obj.Path
 	}
 	return obj.Name()
+}
+
+func normalizeHTTPHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	host = strings.TrimSuffix(host, ".")
+	return strings.ToLower(host)
 }
 
 // serveHTTP is the real implementation of ServeHTTP, but with a more ergonomic
@@ -371,6 +390,10 @@ func (obj *HTTPServerProxyRes) ParentName() string {
 // AcceptHTTP determines whether we will respond to this request. Return nil to
 // accept, or any error to pass.
 func (obj *HTTPServerProxyRes) AcceptHTTP(req *http.Request) error {
+	if obj.Host != "" && normalizeHTTPHost(req.Host) != normalizeHTTPHost(obj.Host) {
+		return fmt.Errorf("unhandled host")
+	}
+
 	requestPath := req.URL.Path // TODO: is this what we want here?
 
 	if p := obj.getPath(); strings.HasSuffix(p, "/") { // a dir!
@@ -429,6 +452,14 @@ func (obj *HTTPServerProxyRes) Validate() error {
 	// FIXME: does getPath need to start with a slash?
 	if !strings.HasPrefix(obj.getPath(), "/") {
 		return fmt.Errorf("the path must be absolute")
+	}
+	if obj.Host != "" {
+		if strings.Contains(obj.Host, "/") {
+			return fmt.Errorf("the Host field must not contain a path")
+		}
+		if normalizeHTTPHost(obj.Host) == "" {
+			return fmt.Errorf("the Host field must not be empty when specified")
+		}
 	}
 
 	if obj.Sub != "" && (!strings.HasPrefix(obj.Sub, "/") || !strings.HasSuffix(obj.Sub, "/")) {
@@ -507,6 +538,9 @@ func (obj *HTTPServerProxyRes) Cmp(r engine.Res) error {
 	}
 	if obj.Path != res.Path {
 		return fmt.Errorf("the Path differs")
+	}
+	if normalizeHTTPHost(obj.Host) != normalizeHTTPHost(res.Host) {
+		return fmt.Errorf("the Host differs")
 	}
 
 	if obj.Sub != res.Sub {

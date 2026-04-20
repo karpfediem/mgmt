@@ -77,6 +77,10 @@ type HTTPServerFileRes struct {
 	// http server.
 	Filename string `lang:"filename" yaml:"filename"`
 
+	// Host optionally restricts this file to requests with a matching host
+	// header. The comparison ignores case and strips an incoming port suffix.
+	Host string `lang:"host" yaml:"host"`
+
 	// Path is the absolute path to a file that should be used as the source
 	// for this file resource. It must not be combined with the data field.
 	// If this corresponds to a directory, then it will used as a root dir
@@ -178,6 +182,10 @@ func (obj *HTTPServerFileRes) ParentName() string {
 // AcceptHTTP determines whether we will respond to this request. Return nil to
 // accept, or any error to pass.
 func (obj *HTTPServerFileRes) AcceptHTTP(req *http.Request) error {
+	if obj.Host != "" && normalizeHTTPHost(req.Host) != normalizeHTTPHost(obj.Host) {
+		return fmt.Errorf("unhandled host")
+	}
+
 	requestPath := req.URL.Path // TODO: is this what we want here?
 
 	if strings.HasSuffix(obj.Path, "/") { // a dir!
@@ -244,6 +252,17 @@ func (obj *HTTPServerFileRes) Validate() error {
 		return fmt.Errorf("empty filename")
 	}
 	// FIXME: does getPath need to start with a slash?
+	if !strings.HasPrefix(obj.getPath(), "/") {
+		return fmt.Errorf("the filename must be absolute")
+	}
+	if obj.Host != "" {
+		if strings.Contains(obj.Host, "/") {
+			return fmt.Errorf("the Host field must not contain a path")
+		}
+		if normalizeHTTPHost(obj.Host) == "" {
+			return fmt.Errorf("the Host field must not be empty when specified")
+		}
+	}
 
 	if obj.Path != "" && !strings.HasPrefix(obj.Path, "/") {
 		return fmt.Errorf("the Path must be absolute")
@@ -307,6 +326,9 @@ func (obj *HTTPServerFileRes) Cmp(r engine.Res) error {
 	}
 	if obj.Filename != res.Filename {
 		return fmt.Errorf("the Filename differs")
+	}
+	if normalizeHTTPHost(obj.Host) != normalizeHTTPHost(res.Host) {
+		return fmt.Errorf("the Host differs")
 	}
 	if obj.Path != res.Path {
 		return fmt.Errorf("the Path differs")

@@ -33,6 +33,8 @@ package resources
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -149,6 +151,68 @@ func TestHttpServerProxyPathParser0(t *testing.T) {
 				t.Logf("test #%d:   cachePath: %s", index, cachePath)
 				t.Logf("test #%d:      result: %s", index, result.cachePath)
 				//return
+			}
+		})
+	}
+}
+
+func TestHTTPServerProxyAcceptHTTPHost(t *testing.T) {
+	testCases := []struct {
+		name         string
+		resourceHost string
+		requestHost  string
+		requestPath  string
+		wantErr      bool
+	}{
+		{
+			name:         "path-only proxy ignores host",
+			resourceHost: "",
+			requestHost:  "site.example.test",
+			requestPath:  "/.well-known/acme-challenge/token",
+		},
+		{
+			name:         "host match exact",
+			resourceHost: "site.example.test",
+			requestHost:  "site.example.test",
+			requestPath:  "/.well-known/acme-challenge/token",
+		},
+		{
+			name:         "host match strips port and ignores case",
+			resourceHost: "Site.Example.Test",
+			requestHost:  "site.example.test:80",
+			requestPath:  "/.well-known/acme-challenge/token",
+		},
+		{
+			name:         "host mismatch rejected",
+			resourceHost: "api.example.test",
+			requestHost:  "site.example.test",
+			requestPath:  "/.well-known/acme-challenge/token",
+			wantErr:      true,
+		},
+		{
+			name:         "path mismatch still rejected",
+			resourceHost: "site.example.test",
+			requestHost:  "site.example.test",
+			requestPath:  "/healthz",
+			wantErr:      true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &HTTPServerProxyRes{
+				Path: "/.well-known/acme-challenge/",
+				Host: tc.resourceHost,
+			}
+			req := httptest.NewRequest(http.MethodGet, "http://example.test"+tc.requestPath, nil)
+			req.Host = tc.requestHost
+
+			err := res.AcceptHTTP(req)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected nil error, got: %v", err)
 			}
 		})
 	}
