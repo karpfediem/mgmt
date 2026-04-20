@@ -60,6 +60,7 @@ import (
 
 func init() {
 	engine.RegisterResource("acme", func() engine.Res { return &AcmeRes{} })
+	engine.RegisterResource("acme:request", func() engine.Res { return &AcmeRes{} })
 }
 
 const (
@@ -98,6 +99,10 @@ type AcmeRes struct {
 	// Challenge selects how the ACME authorization is solved.
 	// Supported values are: http-01, dns-01.
 	Challenge string `lang:"challenge" yaml:"challenge"`
+
+	// Solver selects an explicit ACME solver resource when the request uses
+	// http-01.
+	Solver string `lang:"solver" yaml:"solver"`
 
 	// DNSProvider selects the lego-backed DNS provider used when Challenge is
 	// dns-01.
@@ -176,6 +181,9 @@ func (obj *AcmeRes) Validate() error {
 	case acmeChallengeDNS01:
 	default:
 		return fmt.Errorf("the Challenge field must be one of %q or %q", acmeChallengeHTTP01, acmeChallengeDNS01)
+	}
+	if obj.normalizedSolver() != "" && obj.normalizedChallenge() != acmeChallengeHTTP01 {
+		return fmt.Errorf("the Solver field is only valid when Challenge is %q", acmeChallengeHTTP01)
 	}
 	if obj.DirectoryURL == "" {
 		return fmt.Errorf("the DirectoryURL field must not be empty")
@@ -341,6 +349,9 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 	}
 	if obj.normalizedChallenge() != res.normalizedChallenge() {
 		return fmt.Errorf("the Challenge field differs")
+	}
+	if obj.normalizedSolver() != res.normalizedSolver() {
+		return fmt.Errorf("the Solver field differs")
 	}
 	if obj.normalizedDNSProvider() != res.normalizedDNSProvider() {
 		return fmt.Errorf("the DNSProvider field differs")
@@ -755,17 +766,27 @@ func (obj *AcmeRes) newLegoClient(state *acmeStoredState) (acmeClient, error) {
 
 	switch obj.normalizedChallenge() {
 	case acmeChallengeHTTP01:
-		provider := http01.NewProviderServer(obj.HTTPAddress, strconv.Itoa(int(obj.HTTPPort)))
-		if obj.HTTPProxyHeader != "" {
-			provider.SetProxyHeader(obj.HTTPProxyHeader)
-		}
+		if obj.normalizedSolver() != "" {
+			provider, err := newAcmeHTTP01Provider(obj.init.Local, obj.normalizedSolver())
+			if err != nil {
+				return nil, err
+			}
+			if err := client.Challenge.SetHTTP01Provider(provider); err != nil {
+				return nil, err
+			}
+		} else {
+			provider := http01.NewProviderServer(obj.HTTPAddress, strconv.Itoa(int(obj.HTTPPort)))
+			if obj.HTTPProxyHeader != "" {
+				provider.SetProxyHeader(obj.HTTPProxyHeader)
+			}
 
-		options := []http01.ChallengeOption{}
-		if obj.HTTPDelaySeconds > 0 {
-			options = append(options, http01.SetDelay(time.Duration(obj.HTTPDelaySeconds)*time.Second))
-		}
-		if err := client.Challenge.SetHTTP01Provider(provider, options...); err != nil {
-			return nil, err
+			options := []http01.ChallengeOption{}
+			if obj.HTTPDelaySeconds > 0 {
+				options = append(options, http01.SetDelay(time.Duration(obj.HTTPDelaySeconds)*time.Second))
+			}
+			if err := client.Challenge.SetHTTP01Provider(provider, options...); err != nil {
+				return nil, err
+			}
 		}
 
 	case acmeChallengeDNS01:
@@ -809,6 +830,10 @@ func (obj *AcmeRes) desiredDomains() []string {
 
 func (obj *AcmeRes) normalizedChallenge() string {
 	return strings.ToLower(strings.TrimSpace(obj.Challenge))
+}
+
+func (obj *AcmeRes) normalizedSolver() string {
+	return strings.TrimSpace(obj.Solver)
 }
 
 func (obj *AcmeRes) normalizedDNSProvider() string {

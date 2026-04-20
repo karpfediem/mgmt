@@ -47,12 +47,13 @@ files.
 
 ## Acme
 
-The acme resource obtains and automatically renews certificates with ACME.
-Challenge selection is explicit.
+The `acme` and `acme:request` resources obtain and automatically renew
+certificates with ACME.
 
 Supported challenge values:
 
-* `http-01`: uses the embedded HTTP challenge server.
+* `http-01`: the recommended explicit mode uses `solver => "..."` with an
+  `acme:solver:http01` resource grouped into an `http:server`.
 * `dns-01`: uses a lego-backed DNS provider selected by name with explicit
   `dns_provider` and `dns_env` inputs.
 
@@ -63,6 +64,11 @@ For staged `http-01` orchestration, Send/Recv also exposes `pending` and
 `http01_pending`. The optional `http01_ready` input can hold the actual
 challenge attempt until related resources such as temporary firewall rules have
 already converged.
+
+The `acme:solver:http01` resource is an explicit HTTP-01 presenter. It groups
+into an `http:server`, serves `/.well-known/acme-challenge/*` dynamically for
+active challenges, and keeps challenge presentation separate from the ACME
+transaction resource.
 
 ## Docker
 

@@ -1,17 +1,26 @@
 # Obtain a certificate with ACME and send the PEM material into file resources.
 #
-# The embedded HTTP-01 listener must be reachable from the CA, typically on
-# TCP port 80 for the requested domains.
+# HTTP-01 presentation is modelled explicitly through acme:solver:http01 and a
+# grouped http:server resource.
 # For staged HTTP-01 setups, http01_pending can drive temporary reachability
 # resources and http01_ready can release the challenge once they are in place.
 
-acme "example.com" {
+http:server "public-80" {
+  address => ":80",
+}
+
+acme:solver:http01 "public-http01" {
+  server => "public-80",
+  hosts => ["example.com", "www.example.com"],
+}
+
+acme:request "example.com" {
   accept_tos => true,
   email => "ops@example.com",
   domains => ["example.com", "www.example.com"],
   challenge => "http-01",
-  http_address => "0.0.0.0",
-  http_port => 80,
+  solver => "public-http01",
+  http01_ready => true,
 }
 
 file "/etc/ssl/example.com/fullchain.pem" {
@@ -24,5 +33,5 @@ file "/etc/ssl/example.com/privkey.pem" {
   mode => "0600",
 }
 
-Acme["example.com"].fullchain -> File["/etc/ssl/example.com/fullchain.pem"].content
-Acme["example.com"].private_key -> File["/etc/ssl/example.com/privkey.pem"].content
+Acme:Request["example.com"].fullchain -> File["/etc/ssl/example.com/fullchain.pem"].content
+Acme:Request["example.com"].private_key -> File["/etc/ssl/example.com/privkey.pem"].content
