@@ -160,6 +160,12 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 	}
 
 	payload := sent()
+	if payload.Pending {
+		t.Fatalf("expected pending to be false after successful issuance")
+	}
+	if payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be false after successful issuance")
+	}
 	if payload.PrivateKey != normalizePEMString(key) {
 		t.Fatalf("unexpected private key payload")
 	}
@@ -239,6 +245,12 @@ func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
 	}
 
 	payload := sent()
+	if payload.Pending {
+		t.Fatalf("expected pending to be false after successful renewal")
+	}
+	if payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be false after successful renewal")
+	}
 	if payload.Certificate != normalizePEMString(nextLeaf) {
 		t.Fatalf("unexpected renewed certificate payload")
 	}
@@ -296,6 +308,79 @@ func TestAcmeValidateRejectsMissingDNSProviderEnv(t *testing.T) {
 	err := res.Validate()
 	if err == nil || !strings.Contains(err.Error(), "DNSEnv") {
 		t.Fatalf("expected dns env validation error, got: %v", err)
+	}
+}
+
+func TestAcmeCheckApplyWaitsForHTTP01Ready(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	http01Ready := false
+
+	res := &AcmeRes{
+		AcceptTOS:   true,
+		Email:       "ops@example.com",
+		Domains:     []string{"example.com"},
+		Challenge:   acmeChallengeHTTP01,
+		HTTP01Ready: &http01Ready,
+	}
+	init, sent := fakeAcmeInit(t, false)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
+		t.Fatalf("clientFactory should not be called while http01_ready is false")
+		return nil, nil
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false while waiting for http01_ready")
+	}
+
+	payload := sent()
+	if !payload.Pending {
+		t.Fatalf("expected pending to be true while waiting for http01_ready")
+	}
+	if !payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be true while waiting for http01_ready")
+	}
+	if payload.PrivateKey != "" {
+		t.Fatalf("expected no private key material while waiting for issuance")
+	}
+}
+
+func TestAcmeCheckApplyDNS01PendingDoesNotSetHTTP01Pending(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
+	res := &AcmeRes{
+		AcceptTOS: true,
+		Email:     "ops@example.com",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeDNS01,
+	}
+	init, sent := fakeAcmeInit(t, false)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false while dns-01 issuance is pending")
+	}
+
+	payload := sent()
+	if !payload.Pending {
+		t.Fatalf("expected pending to be true during planning pass")
+	}
+	if payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be false for dns-01")
 	}
 }
 

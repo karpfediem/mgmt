@@ -81,6 +81,7 @@ type AcmeRes struct {
 	traits.Base
 	traits.Refreshable
 	traits.Sendable
+	traits.Recvable
 
 	init *engine.Init
 
@@ -139,6 +140,10 @@ type AcmeRes struct {
 	// HTTPProxyHeader changes which request header is used to validate the
 	// incoming challenge hostname, for example X-Forwarded-Host.
 	HTTPProxyHeader string `lang:"http_proxy_header" yaml:"http_proxy_header"`
+
+	// HTTP01Ready optionally gates when an HTTP-01 challenge attempt may run.
+	// A nil value means no external gate is in use.
+	HTTP01Ready *bool `lang:"http01_ready" yaml:"http01_ready"`
 
 	varDir    string
 	statePath string
@@ -277,13 +282,24 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 
 	if plan.needsApply && !apply {
 		obj.updateSchedule(state, now)
-		if err := obj.init.Send(obj.buildSends(state)); err != nil {
+		if err := obj.init.Send(obj.buildSends(state, plan)); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
 
 	if plan.needsApply {
+		if !obj.http01Ready() {
+			obj.init.Logf("waiting for http01_ready before attempting ACME HTTP-01 challenge")
+			obj.updateSchedule(state, now)
+			if err := obj.init.Send(obj.buildSends(state, plan)); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		if err := obj.init.Send(obj.buildSends(state, plan)); err != nil {
+			return false, err
+		}
 		obj.init.Logf("reconciling ACME state: %s", plan.reason)
 		nextState, err := obj.reconcileState(state, plan)
 		if err != nil {
@@ -297,7 +313,7 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 
 	obj.updateSchedule(state, now)
 
-	if err := obj.init.Send(obj.buildSends(state)); err != nil {
+	if err := obj.init.Send(obj.buildSends(state, nil)); err != nil {
 		return false, err
 	}
 
@@ -359,6 +375,9 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 	if obj.HTTPProxyHeader != res.HTTPProxyHeader {
 		return fmt.Errorf("the HTTPProxyHeader field differs")
 	}
+	if !reflect.DeepEqual(obj.HTTP01Ready, res.HTTP01Ready) {
+		return fmt.Errorf("the HTTP01Ready field differs")
+	}
 
 	return nil
 }
@@ -390,6 +409,8 @@ type AcmeSends struct {
 	FullChain         string `lang:"fullchain"`
 	NotBefore         int64  `lang:"not_before"`
 	NotAfter          int64  `lang:"not_after"`
+	Pending           bool   `lang:"pending"`
+	HTTP01Pending     bool   `lang:"http01_pending"`
 }
 
 // Sends represents the default struct of values we can send using Send/Recv.
@@ -912,8 +933,21 @@ func (obj *AcmeRes) renewBefore() time.Duration {
 	return time.Duration(obj.RenewBeforeDays) * 24 * time.Hour
 }
 
-func (obj *AcmeRes) buildSends(state *acmeStoredState) *AcmeSends {
-	sends := &AcmeSends{}
+func (obj *AcmeRes) http01Ready() bool {
+	if obj.normalizedChallenge() != acmeChallengeHTTP01 {
+		return true
+	}
+	if obj.HTTP01Ready == nil {
+		return true
+	}
+	return *obj.HTTP01Ready
+}
+
+func (obj *AcmeRes) buildSends(state *acmeStoredState, plan *acmePlan) *AcmeSends {
+	sends := &AcmeSends{
+		Pending:       plan != nil && plan.needsApply,
+		HTTP01Pending: plan != nil && plan.needsApply && obj.normalizedChallenge() == acmeChallengeHTTP01,
+	}
 	if state == nil || !state.hasCertificateMaterial() {
 		return sends
 	}

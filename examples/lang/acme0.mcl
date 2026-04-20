@@ -2,6 +2,8 @@
 #
 # The embedded HTTP-01 listener must be reachable from the CA, typically on
 # TCP port 80 for the requested domains.
+# For staged HTTP-01 setups, http01_pending can drive temporary reachability
+# resources and http01_ready can release the challenge once they are in place.
 
 acme "example.com" {
   accept_tos => true,

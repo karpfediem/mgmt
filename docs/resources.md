@@ -59,6 +59,11 @@ Supported challenge values:
 The resulting PEM material is available over Send/Recv so that resources such
 as file can write the certificate, full chain, and private key to disk.
 
+For staged `http-01` orchestration, Send/Recv also exposes `pending` and
+`http01_pending`. The optional `http01_ready` input can hold the actual
+challenge attempt until related resources such as temporary firewall rules have
+already converged.
+
 ## Docker
 
 ### Container
