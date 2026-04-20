@@ -90,6 +90,23 @@ type HetznerFirewallRes struct {
 	firewall *hcloud.Firewall
 }
 
+// ReversibleMeta returns the reverse metadata with overwrite enabled by
+// default, so reactive firewall spec changes can update the stored reverse
+// snapshot without conflicting with an older pending one.
+func (obj *HetznerFirewallRes) ReversibleMeta() *engine.ReversibleMeta {
+	if obj.Xmeta == nil {
+		obj.Xmeta = &engine.ReversibleMeta{
+			Overwrite: true,
+		}
+	}
+	return obj.Xmeta
+}
+
+// SetReversibleMeta sets the reverse metadata for this resource.
+func (obj *HetznerFirewallRes) SetReversibleMeta(meta *engine.ReversibleMeta) {
+	obj.Xmeta = meta
+}
+
 // Default returns conservative defaults for this resource.
 func (obj *HetznerFirewallRes) Default() engine.Res {
 	return &HetznerFirewallRes{

@@ -314,6 +314,22 @@ func TestHetznerFirewallReverseDeleteDetachesBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestHetznerFirewallReversibleMetaDefaultsOverwrite(t *testing.T) {
+	res := &HetznerFirewallRes{}
+
+	meta := res.ReversibleMeta()
+	if !meta.Overwrite {
+		t.Fatalf("expected reverse overwrite to default to true")
+	}
+
+	meta.Disabled = false
+	res.SetReversibleMeta(meta)
+
+	if !res.ReversibleMeta().Overwrite {
+		t.Fatalf("expected reverse overwrite to remain true after meta update")
+	}
+}
+
 func TestHetznerFirewallCmpIgnoresApplyToOrder(t *testing.T) {
 	left := &HetznerFirewallRes{
 		APIToken: "token",
