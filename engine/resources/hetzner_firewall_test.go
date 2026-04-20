@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"testing"
 
@@ -113,6 +114,24 @@ func (obj *fakeHetznerNamedServerLookupClient) GetByName(_ context.Context, name
 	return obj.servers[name], nil, nil
 }
 
+func fakeHetznerFirewallInit(t *testing.T) (*engine.Init, *HetznerFirewallSends) {
+	t.Helper()
+
+	sends := &HetznerFirewallSends{}
+	return &engine.Init{
+		Event: func(context.Context) error { return nil },
+		Send: func(st interface{}) error {
+			x, ok := st.(*HetznerFirewallSends)
+			if !ok {
+				return fmt.Errorf("unexpected send type: %T", st)
+			}
+			*sends = *x
+			return nil
+		},
+		Logf: func(string, ...interface{}) {},
+	}, sends
+}
+
 func TestHetznerFirewallCreate(t *testing.T) {
 	firewallClient := &fakeHetznerFirewallLifecycleClient{}
 	serverClient := &fakeHetznerNamedServerLookupClient{
@@ -163,6 +182,49 @@ func TestHetznerFirewallCreate(t *testing.T) {
 	}
 	if len(waiter.actions) != 1 {
 		t.Fatalf("expected waiter to observe one action, got %d", len(waiter.actions))
+	}
+}
+
+func TestHetznerFirewallSendReadyAfterCreate(t *testing.T) {
+	firewallClient := &fakeHetznerFirewallLifecycleClient{}
+	serverClient := &fakeHetznerNamedServerLookupClient{
+		servers: map[string]*hcloud.Server{
+			"beta-api": {ID: 5, Name: "beta-api"},
+		},
+	}
+	waiter := &fakeHetznerActionWaiter{}
+	init, sends := fakeHetznerFirewallInit(t)
+
+	res := &HetznerFirewallRes{
+		APIToken: "token",
+		Rules: []HetznerFirewallRuleSpec{
+			{
+				Direction: "in",
+				SourceIPs: []string{"0.0.0.0/0"},
+				Protocol:  "tcp",
+				Port:      "80",
+			},
+		},
+		ApplyTo: []HetznerFirewallApplyToSpec{
+			{Type: "server", Server: "beta-api"},
+		},
+		WaitInterval:   HetznerWaitIntervalDefault,
+		WaitTimeout:    HetznerWaitTimeoutDefault,
+		firewallClient: firewallClient,
+		serverClient:   serverClient,
+		actionWaiter:   waiter,
+		init:           init,
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("CheckApply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected create to report non-converged on apply")
+	}
+	if !sends.Ready {
+		t.Fatalf("expected ready send to be true after create completed")
 	}
 }
 
@@ -264,6 +326,69 @@ func TestHetznerFirewallReconcileApplyTo(t *testing.T) {
 	}
 	if len(waiter.actions) != 2 {
 		t.Fatalf("expected waiter to observe two actions, got %d", len(waiter.actions))
+	}
+}
+
+func TestHetznerFirewallSendReadyOnConvergedDryRun(t *testing.T) {
+	firewallClient := &fakeHetznerFirewallLifecycleClient{
+		firewall: &hcloud.Firewall{
+			ID:     1,
+			Name:   "beta-http01",
+			Labels: map[string]string{"cluster": "beta"},
+			Rules: []hcloud.FirewallRule{
+				{
+					Direction: hcloud.FirewallRuleDirectionIn,
+					SourceIPs: []net.IPNet{mustParseFirewallCIDR(t, "0.0.0.0/0")},
+					Protocol:  hcloud.FirewallRuleProtocolTCP,
+					Port:      ptrString("80"),
+				},
+			},
+			AppliedTo: []hcloud.FirewallResource{
+				{
+					Type:   hcloud.FirewallResourceTypeServer,
+					Server: &hcloud.FirewallResourceServer{ID: 5},
+				},
+			},
+		},
+	}
+	serverClient := &fakeHetznerNamedServerLookupClient{
+		servers: map[string]*hcloud.Server{
+			"beta-api": {ID: 5, Name: "beta-api"},
+		},
+	}
+	init, sends := fakeHetznerFirewallInit(t)
+
+	res := &HetznerFirewallRes{
+		APIToken: "token",
+		Rules: []HetznerFirewallRuleSpec{
+			{
+				Direction: "in",
+				SourceIPs: []string{"0.0.0.0/0"},
+				Protocol:  "tcp",
+				Port:      "80",
+			},
+		},
+		ApplyTo: []HetznerFirewallApplyToSpec{
+			{Type: "server", Server: "beta-api"},
+		},
+		Labels:         map[string]string{"cluster": "beta"},
+		WaitInterval:   HetznerWaitIntervalDefault,
+		WaitTimeout:    HetznerWaitTimeoutDefault,
+		firewallClient: firewallClient,
+		serverClient:   serverClient,
+		actionWaiter:   &fakeHetznerActionWaiter{},
+		init:           init,
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("CheckApply failed: %v", err)
+	}
+	if !checkOK {
+		t.Fatalf("expected dry-run to report converged")
+	}
+	if !sends.Ready {
+		t.Fatalf("expected ready send to be true on converged dry-run")
 	}
 }
 
@@ -369,4 +494,14 @@ func ExampleHetznerFirewallRes() {
 
 func ptrString(value string) *string {
 	return &value
+}
+
+func mustParseFirewallCIDR(t *testing.T, value string) net.IPNet {
+	t.Helper()
+
+	_, network, err := net.ParseCIDR(value)
+	if err != nil {
+		t.Fatalf("ParseCIDR failed: %v", err)
+	}
+	return *network
 }

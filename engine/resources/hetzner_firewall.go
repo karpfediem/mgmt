@@ -71,6 +71,7 @@ type HetznerFirewallApplyToSpec struct {
 type HetznerFirewallRes struct {
 	traits.Base
 	traits.Reversible
+	traits.Sendable
 
 	init *engine.Init
 
@@ -88,6 +89,13 @@ type HetznerFirewallRes struct {
 	serverClient   hetznerServerLookupClient
 
 	firewall *hcloud.Firewall
+}
+
+// HetznerFirewallSends is the observed lifecycle state exposed over send/recv.
+type HetznerFirewallSends struct {
+	// Ready reports whether the live Hetzner firewall currently matches the
+	// desired labels, rules, and apply_to targets.
+	Ready bool `lang:"ready"`
 }
 
 // ReversibleMeta returns the reverse metadata with overwrite enabled by
@@ -173,23 +181,46 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 
 	if obj.firewall == nil {
 		if obj.ReversibleMeta().Reversal {
+			if err := obj.sendState(false); err != nil {
+				return false, err
+			}
 			return true, nil
 		}
+		desiredRules, err := hetznerFirewallRulesFromSpecs(obj.Rules)
+		if err != nil {
+			return false, errwrap.Wrapf(err, "hetznerFirewallRulesFromSpecs failed")
+		}
+		desiredApplyTo, err := obj.desiredApplyTo(ctx)
+		if err != nil {
+			return false, errwrap.Wrapf(err, "desiredApplyTo failed")
+		}
 		if !apply {
+			if err := obj.sendState(false); err != nil {
+				return false, err
+			}
 			return false, nil
 		}
 		if err := obj.create(ctx); err != nil {
 			return false, errwrap.Wrapf(err, "create failed")
+		}
+		if err := obj.sendState(obj.firewallReady(desiredRules, desiredApplyTo)); err != nil {
+			return false, err
 		}
 		return false, nil
 	}
 
 	if obj.ReversibleMeta().Reversal {
 		if !apply {
+			if err := obj.sendState(false); err != nil {
+				return false, err
+			}
 			return false, nil
 		}
 		if err := obj.delete(ctx); err != nil {
 			return false, errwrap.Wrapf(err, "delete failed")
+		}
+		if err := obj.sendState(false); err != nil {
+			return false, err
 		}
 		return false, nil
 	}
@@ -202,12 +233,16 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 	if err != nil {
 		return false, errwrap.Wrapf(err, "desiredApplyTo failed")
 	}
+	if !apply {
+		ready := obj.firewallReady(desiredRules, desiredApplyTo)
+		if err := obj.sendState(ready); err != nil {
+			return false, err
+		}
+		return ready, nil
+	}
 
 	checkOK := true
 	if !maps.Equal(obj.firewall.Labels, obj.Labels) {
-		if !apply {
-			return false, nil
-		}
 		if err := obj.update(ctx); err != nil {
 			return false, errwrap.Wrapf(err, "update failed")
 		}
@@ -215,9 +250,6 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 	}
 
 	if !hetznerFirewallRulesEqual(obj.firewall.Rules, desiredRules) {
-		if !apply {
-			return false, nil
-		}
 		if err := obj.setRules(ctx, desiredRules); err != nil {
 			return false, errwrap.Wrapf(err, "setRules failed")
 		}
@@ -226,14 +258,15 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 	}
 
 	if !hetznerFirewallApplyToEqual(obj.firewall.AppliedTo, desiredApplyTo) {
-		if !apply {
-			return false, nil
-		}
 		if err := obj.reconcileApplyTo(ctx, desiredApplyTo); err != nil {
 			return false, errwrap.Wrapf(err, "reconcileApplyTo failed")
 		}
 		obj.firewall.AppliedTo = slices.Clone(desiredApplyTo)
 		checkOK = false
+	}
+
+	if err := obj.sendState(obj.firewallReady(desiredRules, desiredApplyTo)); err != nil {
+		return false, err
 	}
 
 	return checkOK, nil
@@ -390,6 +423,28 @@ func (obj *HetznerFirewallRes) getFirewallUpdate(ctx context.Context) error {
 	}
 	obj.firewall = firewall
 	return nil
+}
+
+func (obj *HetznerFirewallRes) firewallReady(desiredRules []hcloud.FirewallRule, desiredApplyTo []hcloud.FirewallResource) bool {
+	if obj.firewall == nil || obj.ReversibleMeta().Reversal {
+		return false
+	}
+	return maps.Equal(obj.firewall.Labels, obj.Labels) &&
+		hetznerFirewallRulesEqual(obj.firewall.Rules, desiredRules) &&
+		hetznerFirewallApplyToEqual(obj.firewall.AppliedTo, desiredApplyTo)
+}
+
+func (obj *HetznerFirewallRes) sendState(ready bool) error {
+	sends := &HetznerFirewallSends{Ready: ready}
+	if obj.init != nil && obj.init.Send != nil {
+		return obj.init.Send(sends)
+	}
+	return obj.Send(sends)
+}
+
+// Sends represents the default send/recv values exposed by hetzner:firewall.
+func (obj *HetznerFirewallRes) Sends() interface{} {
+	return &HetznerFirewallSends{}
 }
 
 func (obj *HetznerFirewallRes) desiredApplyTo(ctx context.Context) ([]hcloud.FirewallResource, error) {
