@@ -66,8 +66,9 @@ The resulting PEM material from `acme:request` is available over Send/Recv so
 that resources such as file can write the certificate, full chain, and private
 key to disk.
 
-`acme:account` sends `ready` and `data`, and `acme:request` consumes those
-values through the `account_ready` and `account_data` inputs.
+`acme:request` loads its ACME account material from the named `acme:account`
+resource through the distributed world store. The MCL interface is the
+explicit `account => "..."` reference.
 
 For staged `http-01` orchestration, Send/Recv also exposes `pending` and
 `http01_pending`. The optional `http01_ready` input can hold the actual

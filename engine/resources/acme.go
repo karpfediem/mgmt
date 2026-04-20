@@ -77,24 +77,16 @@ const (
 var acmeDNSProviderEnvMu sync.Mutex
 
 // AcmeRes manages an ACME certificate request using explicit ACME challenge
-// configuration and account data received from acme:account.
+// configuration and account state loaded from acme:account.
 type AcmeRes struct {
 	traits.Base
 	traits.Refreshable
 	traits.Sendable
-	traits.Recvable
 
 	init *engine.Init
 
 	// Account is the logical ACME account name this request expects.
 	Account string `lang:"account" yaml:"account"`
-
-	// AccountReady indicates whether the referenced acme:account has valid
-	// account material ready for use.
-	AccountReady bool `lang:"account_ready" yaml:"account_ready"`
-
-	// AccountData is the encoded account payload sent by acme:account.
-	AccountData string `lang:"account_data" yaml:"account_data"`
 
 	// Domains is the ordered list of domains for the requested certificate.
 	// If omitted, the resource name is used as a single-domain certificate.
@@ -144,6 +136,7 @@ type AcmeRes struct {
 	scheduleMu sync.Mutex
 	scheduleAt *time.Time
 	scheduleCh chan struct{}
+	recheckCh  chan struct{}
 }
 
 // Default returns some sensible defaults for this resource.
@@ -211,6 +204,9 @@ func (obj *AcmeRes) Init(init *engine.Init) error {
 	if obj.scheduleCh == nil {
 		obj.scheduleCh = make(chan struct{}, 1)
 	}
+	if obj.recheckCh == nil {
+		obj.recheckCh = make(chan struct{}, 1)
+	}
 
 	return nil
 }
@@ -225,6 +221,13 @@ func (obj *AcmeRes) Cleanup() error {
 
 // Watch is the primary listener for this resource and it outputs events.
 func (obj *AcmeRes) Watch(ctx context.Context) error {
+	var accountCh chan error
+	ch, err := obj.init.World.StrWatch(ctx, acmeAccountStateKey(obj.Account))
+	if err != nil {
+		return err
+	}
+	accountCh = ch
+
 	var presentationCh chan error
 	if obj.normalizedChallenge() == acmeChallengeHTTP01 && obj.normalizedSolver() != "" {
 		ch, err := obj.init.World.StrMapWatch(ctx, acmeHTTP01PresentationStateKey(obj.normalizedSolver()))
@@ -254,6 +257,22 @@ func (obj *AcmeRes) Watch(ctx context.Context) error {
 			}
 			continue
 
+		case <-obj.recheckCh:
+			if timer != nil {
+				timer.Stop()
+			}
+
+		case err, ok := <-accountCh:
+			if timer != nil {
+				timer.Stop()
+			}
+			if !ok {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+
 		case err, ok := <-presentationCh:
 			if timer != nil {
 				timer.Stop()
@@ -277,8 +296,6 @@ func (obj *AcmeRes) Watch(ctx context.Context) error {
 
 // CheckApply ensures the local ACME state is present and renewed when needed.
 func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
-	_ = ctx
-
 	refresh := obj.init.Refresh()
 	now := obj.now()
 
@@ -290,7 +307,12 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 		state = &acmeStoredState{}
 	}
 
-	plan, err := obj.planState(state, refresh, now)
+	accountData, err := obj.loadAccountData(ctx)
+	if err != nil {
+		return false, errwrap.Wrapf(err, "could not load ACME account state")
+	}
+
+	plan, err := obj.planState(state, refresh, now, accountData)
 	if err != nil {
 		return false, err
 	}
@@ -304,7 +326,7 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 	}
 
 	if plan.needsApply {
-		if !obj.AccountReady {
+		if accountData == nil {
 			obj.init.Logf("waiting for %s[%s] before reconciling the certificate request", "acme:account", obj.Account)
 			obj.updateSchedule(state, now)
 			if err := obj.init.Send(obj.buildSends(state, plan)); err != nil {
@@ -316,12 +338,13 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 			return false, err
 		}
 		obj.init.Logf("reconciling ACME state: %s", plan.reason)
-		nextState, err := obj.reconcileState(state, plan)
+		nextState, err := obj.reconcileState(state, plan, accountData)
 		if nextState != nil {
 			state = nextState
 			if err := obj.saveState(state); err != nil {
 				return false, errwrap.Wrapf(err, "could not save ACME state")
 			}
+			obj.requestImmediateRecheck()
 		}
 		if err != nil {
 			return false, err
@@ -833,17 +856,18 @@ func (obj *legoAcmeUser) GetPrivateKey() crypto.PrivateKey {
 	return obj.privateKey
 }
 
-func (obj *AcmeRes) accountData() (*acmeAccountData, error) {
-	if !obj.AccountReady {
+func (obj *AcmeRes) loadAccountData(ctx context.Context) (*acmeAccountData, error) {
+	state, err := loadAcmeAccountSharedState(ctx, obj.init.World, obj.Account)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil || !state.ready() {
 		return nil, nil
 	}
-	if strings.TrimSpace(obj.AccountData) == "" {
-		return nil, fmt.Errorf("account data is empty while account_ready is true")
-	}
-	return decodeAcmeAccountData(obj.AccountData)
+	return state.data()
 }
 
-func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Time) (*acmePlan, error) {
+func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Time, accountData *acmeAccountData) (*acmePlan, error) {
 	plan := &acmePlan{}
 	state = state.clone()
 
@@ -851,10 +875,6 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 	keyType, err := obj.certificateKeyType()
 	if err != nil {
 		return nil, err
-	}
-	accountData, err := obj.accountData()
-	if err != nil {
-		return nil, errwrap.Wrapf(err, "could not decode account data")
 	}
 
 	if obj.normalizedChallenge() == acmeChallengeHTTP01 && state.HTTP01 != nil {
@@ -974,12 +994,8 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 	return plan, nil
 }
 
-func (obj *AcmeRes) reconcileState(state *acmeStoredState, plan *acmePlan) (*acmeStoredState, error) {
+func (obj *AcmeRes) reconcileState(state *acmeStoredState, plan *acmePlan, accountData *acmeAccountData) (*acmeStoredState, error) {
 	next := state.clone()
-	accountData, err := obj.accountData()
-	if err != nil {
-		return nil, errwrap.Wrapf(err, "could not decode account data")
-	}
 	if accountData == nil {
 		return obj.finalizeStateMetadata(next, nil)
 	}
@@ -1461,6 +1477,13 @@ func (obj *AcmeRes) updateSchedule(state *acmeStoredState, now time.Time) {
 
 	select {
 	case obj.scheduleCh <- struct{}{}:
+	default:
+	}
+}
+
+func (obj *AcmeRes) requestImmediateRecheck() {
+	select {
+	case obj.recheckCh <- struct{}{}:
 	default:
 	}
 }

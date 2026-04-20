@@ -42,35 +42,27 @@ import (
 	"github.com/go-acme/lego/v4/registration"
 )
 
-func fakeAcmeAccountInit(t *testing.T) (*engine.Init, func() *AcmeAccountSends) {
+func fakeAcmeAccountInit(t *testing.T, world *fakeWorld) *engine.Init {
 	t.Helper()
 
 	tmpdir := fmt.Sprintf("%s/", t.TempDir())
-	sends := &AcmeAccountSends{}
+	if world == nil {
+		world = newFakeWorld("account-host")
+	}
 
 	return &engine.Init{
-			Event: func(ctx context.Context) error {
-				return nil
-			},
-			Send: func(st interface{}) error {
-				x, ok := st.(*AcmeAccountSends)
-				if !ok {
-					return fmt.Errorf("unexpected send payload: %T", st)
-				}
-				*sends = *x
-				return nil
-			},
-			VarDir: func(p string) (string, error) {
-				return path.Join(tmpdir, p), nil
-			},
-			Logf: func(string, ...interface{}) {},
-		}, func() *AcmeAccountSends {
-			copy := *sends
-			return &copy
-		}
+		Hostname: "account-host",
+		Event:    func(context.Context) error { return nil },
+		VarDir: func(p string) (string, error) {
+			return path.Join(tmpdir, p), nil
+		},
+		World: world,
+		Logf:  func(string, ...interface{}) {},
+	}
 }
 
-func TestAcmeAccountCheckApplyRegistersAndSendsData(t *testing.T) {
+func TestAcmeAccountCheckApplyRegistersAndPublishesSharedState(t *testing.T) {
+	world := newFakeWorld("account-host")
 	client := &fakeAcmeClient{
 		accountKeyPEM: "ACCOUNT\n",
 		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
@@ -81,8 +73,8 @@ func TestAcmeAccountCheckApplyRegistersAndSendsData(t *testing.T) {
 		AcceptTOS:    true,
 		DirectoryURL: "https://example.test/directory",
 	}
-	init, sent := fakeAcmeAccountInit(t)
-	if err := res.Init(init); err != nil {
+	res.SetName("public-ca")
+	if err := res.Init(fakeAcmeAccountInit(t, world)); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 	res.clientFactory = func(state *acmeAccountStoredState) (acmeClient, error) {
@@ -100,22 +92,20 @@ func TestAcmeAccountCheckApplyRegistersAndSendsData(t *testing.T) {
 		t.Fatalf("expected one EnsureRegistration call, got %d", client.ensureCalls)
 	}
 
-	payload := sent()
-	if !payload.Ready {
-		t.Fatalf("expected account payload to be ready")
-	}
-
-	accountData, err := decodeAcmeAccountData(payload.Data)
+	sharedState, err := loadAcmeAccountSharedState(context.Background(), world, res.Name())
 	if err != nil {
-		t.Fatalf("decodeAcmeAccountData failed: %v", err)
+		t.Fatalf("loadAcmeAccountSharedState failed: %v", err)
 	}
-	if accountData.DirectoryURL != "https://example.test/directory" {
-		t.Fatalf("unexpected directory URL: %q", accountData.DirectoryURL)
+	if sharedState == nil || !sharedState.ready() {
+		t.Fatalf("expected shared account state to be ready")
 	}
-	if accountData.PrivateKeyPEM != "ACCOUNT\n" {
+	if sharedState.DirectoryURL != "https://example.test/directory" {
+		t.Fatalf("unexpected directory URL: %q", sharedState.DirectoryURL)
+	}
+	if sharedState.PrivateKeyPEM != "ACCOUNT\n" {
 		t.Fatalf("unexpected private key payload")
 	}
-	if accountData.RegistrationURI != "https://example.test/acct/1" {
-		t.Fatalf("unexpected registration URI: %q", accountData.RegistrationURI)
+	if sharedState.RegistrationURI != "https://example.test/acct/1" {
+		t.Fatalf("unexpected registration URI: %q", sharedState.RegistrationURI)
 	}
 }

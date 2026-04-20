@@ -132,18 +132,19 @@ func (obj *fakeAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*ce
 	return obj.completeResult, nil
 }
 
-func mustTestAcmeAccountPayload(t *testing.T, directoryURL string) string {
+func mustStoreTestAcmeAccountState(t *testing.T, world *fakeWorld, name, directoryURL string) {
 	t.Helper()
 
-	payload, err := encodeAcmeAccountData(&acmeAccountData{
+	err := storeAcmeAccountSharedState(context.Background(), world, name, &acmeAccountStoredState{
+		Version:         1,
+		Email:           "ops@example.com",
 		DirectoryURL:    directoryURL,
 		PrivateKeyPEM:   "ACCOUNT\n",
 		RegistrationURI: "https://example.test/acct/1",
 	})
 	if err != nil {
-		t.Fatalf("encodeAcmeAccountData failed: %v", err)
+		t.Fatalf("storeAcmeAccountSharedState failed: %v", err)
 	}
-	return payload
 }
 
 func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
@@ -162,15 +163,15 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 			IssuerCertificate: []byte(issuer),
 		},
 	}
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 
 	res := &AcmeRes{
-		Account:      "public-ca",
-		AccountReady: true,
-		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
-		Domains:      []string{"example.com", "www.example.com"},
-		Challenge:    acmeChallengeDNS01,
+		Account:   "public-ca",
+		Domains:   []string{"example.com", "www.example.com"},
+		Challenge: acmeChallengeDNS01,
 	}
-	init, sent := fakeAcmeInit(t, false, nil)
+	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
@@ -212,6 +213,11 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 	if payload.NotAfter != now.Add(90*24*time.Hour).Unix() {
 		t.Fatalf("unexpected expiry timestamp: %d", payload.NotAfter)
 	}
+	select {
+	case <-res.recheckCh:
+	default:
+		t.Fatalf("expected successful issuance to queue an immediate recheck")
+	}
 }
 
 func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
@@ -231,16 +237,16 @@ func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
 			IssuerCertificate: []byte(nextIssuer),
 		},
 	}
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 
 	res := &AcmeRes{
 		Account:         "public-ca",
-		AccountReady:    true,
-		AccountData:     mustTestAcmeAccountPayload(t, "https://example.test/directory"),
 		Domains:         []string{"example.com"},
 		Challenge:       acmeChallengeDNS01,
 		RenewBeforeDays: 30,
 	}
-	init, sent := fakeAcmeInit(t, false, nil)
+	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
@@ -352,7 +358,7 @@ func TestAcmeValidateRejectsMissingHTTP01Solver(t *testing.T) {
 	}
 }
 
-func TestAcmeCheckApplyWaitsForAccountData(t *testing.T) {
+func TestAcmeCheckApplyWaitsForSharedAccountState(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 
 	res := &AcmeRes{
@@ -366,7 +372,7 @@ func TestAcmeCheckApplyWaitsForAccountData(t *testing.T) {
 	}
 	res.nowFn = func() time.Time { return now }
 	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
-		t.Fatalf("clientFactory should not be called while account data is missing")
+		t.Fatalf("clientFactory should not be called while account state is missing")
 		return nil, nil
 	}
 
@@ -375,12 +381,12 @@ func TestAcmeCheckApplyWaitsForAccountData(t *testing.T) {
 		t.Fatalf("checkapply failed: %v", err)
 	}
 	if checkOK {
-		t.Fatalf("expected checkOK to be false while waiting for account data")
+		t.Fatalf("expected checkOK to be false while waiting for account state")
 	}
 
 	payload := sent()
 	if !payload.Pending {
-		t.Fatalf("expected pending to be true while waiting for account data")
+		t.Fatalf("expected pending to be true while waiting for account state")
 	}
 	if payload.HTTP01Pending {
 		t.Fatalf("expected http01_pending to be false while waiting for account data")
@@ -391,6 +397,7 @@ func TestAcmeCheckApplyPreparesHTTP01BeforeReady(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 	http01Ready := false
 	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 
 	orderState := &acmeHTTP01OrderState{
 		Attempt:        "attempt-1",
@@ -420,13 +427,11 @@ func TestAcmeCheckApplyPreparesHTTP01BeforeReady(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		Account:      "public-ca",
-		AccountReady: true,
-		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
-		Domains:      []string{"example.com"},
-		Challenge:    acmeChallengeHTTP01,
-		Solver:       "public-http01",
-		HTTP01Ready:  &http01Ready,
+		Account:     "public-ca",
+		Domains:     []string{"example.com"},
+		Challenge:   acmeChallengeHTTP01,
+		Solver:      "public-http01",
+		HTTP01Ready: &http01Ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
@@ -483,6 +488,7 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 	http01Ready := true
 	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
 
 	orderState := &acmeHTTP01OrderState{
@@ -520,13 +526,11 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		Account:      "public-ca",
-		AccountReady: true,
-		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
-		Domains:      []string{"example.com"},
-		Challenge:    acmeChallengeHTTP01,
-		Solver:       "public-http01",
-		HTTP01Ready:  &http01Ready,
+		Account:     "public-ca",
+		Domains:     []string{"example.com"},
+		Challenge:   acmeChallengeHTTP01,
+		Solver:      "public-http01",
+		HTTP01Ready: &http01Ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
@@ -604,15 +608,15 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 
 func TestAcmeCheckApplyDNS01PendingDoesNotSetHTTP01Pending(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 
 	res := &AcmeRes{
-		Account:      "public-ca",
-		AccountReady: true,
-		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
-		Domains:      []string{"example.com"},
-		Challenge:    acmeChallengeDNS01,
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeDNS01,
 	}
-	init, sent := fakeAcmeInit(t, false, nil)
+	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}

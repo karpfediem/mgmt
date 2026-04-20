@@ -40,5 +40,3 @@ file "/etc/ssl/example.com/privkey.pem" {
 
 Acme:Request["example.com"].fullchain -> File["/etc/ssl/example.com/fullchain.pem"].content
 Acme:Request["example.com"].private_key -> File["/etc/ssl/example.com/privkey.pem"].content
-Acme:Account["letsencrypt-staging"].ready -> Acme:Request["example.com"].account_ready
-Acme:Account["letsencrypt-staging"].data -> Acme:Request["example.com"].account_data

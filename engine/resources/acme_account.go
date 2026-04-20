@@ -132,6 +132,16 @@ func (obj *acmeAccountStoredState) clone() *acmeAccountStoredState {
 	return &clone
 }
 
+func (obj *acmeAccountStoredState) normalize() {
+	if obj == nil {
+		return
+	}
+	obj.Email = strings.TrimSpace(obj.Email)
+	obj.DirectoryURL = strings.TrimSpace(obj.DirectoryURL)
+	obj.PrivateKeyPEM = normalizePEMString(obj.PrivateKeyPEM)
+	obj.RegistrationURI = strings.TrimSpace(obj.RegistrationURI)
+}
+
 func (obj *acmeAccountStoredState) ready() bool {
 	return obj != nil &&
 		strings.TrimSpace(obj.DirectoryURL) != "" &&
@@ -153,15 +163,15 @@ func (obj *acmeAccountStoredState) data() (*acmeAccountData, error) {
 }
 
 type acmeAccountPlan struct {
-	needsApply   bool
-	emailChanged bool
-	reason       string
+	needsApply        bool
+	emailChanged      bool
+	publishSharedOnly bool
+	reason            string
 }
 
 // AcmeAccountRes manages the ACME account identity and registration state.
 type AcmeAccountRes struct {
 	traits.Base
-	traits.Sendable
 
 	init *engine.Init
 
@@ -227,29 +237,37 @@ func (obj *AcmeAccountRes) Cleanup() error {
 
 // Watch is the primary listener for this resource and it outputs events.
 func (obj *AcmeAccountRes) Watch(ctx context.Context) error {
+	ch, err := obj.init.World.StrWatch(ctx, acmeAccountStateKey(obj.Name()))
+	if err != nil {
+		return err
+	}
+
 	if err := obj.init.Event(ctx); err != nil {
 		return err
 	}
-	<-ctx.Done()
-	return nil
-}
 
-// AcmeAccountSends is the send/recv contract for account material.
-type AcmeAccountSends struct {
-	Ready bool   `lang:"ready"`
-	Data  string `lang:"data"`
-}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
 
-// Sends represents the default struct of values we can send using Send/Recv.
-func (obj *AcmeAccountRes) Sends() interface{} {
-	return &AcmeAccountSends{}
+		if err := obj.init.Event(ctx); err != nil {
+			return err
+		}
+	}
 }
 
 // CheckApply ensures the local ACME account state is present.
 func (obj *AcmeAccountRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
-	_ = ctx
-
-	state, err := obj.loadState()
+	state, err := obj.currentState(ctx)
 	if err != nil {
 		return false, errwrap.Wrapf(err, "could not load ACME account state")
 	}
@@ -257,40 +275,44 @@ func (obj *AcmeAccountRes) CheckApply(ctx context.Context, apply bool) (bool, er
 		state = &acmeAccountStoredState{}
 	}
 
-	plan := obj.planState(state)
+	sharedState, err := loadAcmeAccountSharedState(ctx, obj.init.World, obj.Name())
+	if err != nil {
+		return false, errwrap.Wrapf(err, "could not load shared ACME account state")
+	}
+
+	plan := obj.planState(state, sharedState)
 	if plan.needsApply && !apply {
-		if err := obj.init.Send(obj.buildSends(state)); err != nil {
-			return false, err
-		}
 		return false, nil
 	}
 
 	if plan.needsApply {
-		client, err := obj.clientFactory(state.clone())
-		if err != nil {
-			return false, errwrap.Wrapf(err, "could not create ACME account client")
-		}
-
-		reg, err := client.EnsureRegistration(plan.emailChanged, obj.AcceptTOS)
-		if err != nil {
-			return false, errwrap.Wrapf(err, "could not reconcile ACME account registration")
-		}
-
 		next := state.clone()
-		next.Version = 1
-		next.Email = obj.Email
-		next.DirectoryURL = obj.DirectoryURL
-		next.PrivateKeyPEM = normalizePEMString(client.AccountKeyPEM())
-		next.RegistrationURI = reg.URI
+		if !plan.publishSharedOnly {
+			client, err := obj.clientFactory(state.clone())
+			if err != nil {
+				return false, errwrap.Wrapf(err, "could not create ACME account client")
+			}
+
+			reg, err := client.EnsureRegistration(plan.emailChanged, obj.AcceptTOS)
+			if err != nil {
+				return false, errwrap.Wrapf(err, "could not reconcile ACME account registration")
+			}
+
+			next.Version = 1
+			next.Email = obj.Email
+			next.DirectoryURL = obj.DirectoryURL
+			next.PrivateKeyPEM = normalizePEMString(client.AccountKeyPEM())
+			next.RegistrationURI = reg.URI
+			next.normalize()
+		}
 
 		if err := obj.saveState(next); err != nil {
 			return false, errwrap.Wrapf(err, "could not save ACME account state")
 		}
+		if err := storeAcmeAccountSharedState(ctx, obj.init.World, obj.Name(), next); err != nil {
+			return false, errwrap.Wrapf(err, "could not publish shared ACME account state")
+		}
 		state = next
-	}
-
-	if err := obj.init.Send(obj.buildSends(state)); err != nil {
-		return false, err
 	}
 
 	if plan.needsApply {
@@ -319,7 +341,7 @@ func (obj *AcmeAccountRes) Cmp(r engine.Res) error {
 	return nil
 }
 
-func (obj *AcmeAccountRes) planState(state *acmeAccountStoredState) *acmeAccountPlan {
+func (obj *AcmeAccountRes) planState(state, sharedState *acmeAccountStoredState) *acmeAccountPlan {
 	plan := &acmeAccountPlan{
 		emailChanged: state.Email != obj.Email,
 	}
@@ -339,28 +361,20 @@ func (obj *AcmeAccountRes) planState(state *acmeAccountStoredState) *acmeAccount
 		plan.reason = "email changed"
 		return plan
 	}
+	if sharedState == nil || !sharedState.ready() {
+		plan.needsApply = true
+		plan.publishSharedOnly = true
+		plan.reason = "shared account state is missing"
+		return plan
+	}
+	if !acmeAccountStoredStateEqual(state, sharedState) {
+		plan.needsApply = true
+		plan.publishSharedOnly = true
+		plan.reason = "shared account state is out of sync"
+		return plan
+	}
 
 	return plan
-}
-
-func (obj *AcmeAccountRes) buildSends(state *acmeAccountStoredState) *AcmeAccountSends {
-	sends := &AcmeAccountSends{}
-	if state == nil || !state.ready() {
-		return sends
-	}
-
-	data, err := state.data()
-	if err != nil {
-		return sends
-	}
-	payload, err := encodeAcmeAccountData(data)
-	if err != nil {
-		return sends
-	}
-
-	sends.Ready = true
-	sends.Data = payload
-	return sends
 }
 
 func (obj *AcmeAccountRes) loadState() (*acmeAccountStoredState, error) {
@@ -376,10 +390,7 @@ func (obj *AcmeAccountRes) loadState() (*acmeAccountStoredState, error) {
 	if err := json.Unmarshal(data, state); err != nil {
 		return nil, errwrap.Wrapf(err, "could not parse ACME account state")
 	}
-
-	state.PrivateKeyPEM = normalizePEMString(state.PrivateKeyPEM)
-	state.DirectoryURL = strings.TrimSpace(state.DirectoryURL)
-	state.RegistrationURI = strings.TrimSpace(state.RegistrationURI)
+	state.normalize()
 	return state, nil
 }
 
@@ -395,6 +406,33 @@ func (obj *AcmeAccountRes) saveState(state *acmeAccountStoredState) error {
 		return err
 	}
 	return os.Rename(tmp, obj.statePath)
+}
+
+func (obj *AcmeAccountRes) currentState(ctx context.Context) (*acmeAccountStoredState, error) {
+	sharedState, err := loadAcmeAccountSharedState(ctx, obj.init.World, obj.Name())
+	if err != nil {
+		return nil, err
+	}
+	if sharedState != nil && sharedState.ready() {
+		return sharedState, nil
+	}
+	return obj.loadState()
+}
+
+func acmeAccountStoredStateEqual(a, b *acmeAccountStoredState) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	left := a.clone()
+	right := b.clone()
+	left.normalize()
+	right.normalize()
+
+	return left.Email == right.Email &&
+		left.DirectoryURL == right.DirectoryURL &&
+		left.PrivateKeyPEM == right.PrivateKeyPEM &&
+		left.RegistrationURI == right.RegistrationURI
 }
 
 func (obj *AcmeAccountRes) newLegoAccountClient(state *acmeAccountStoredState) (acmeClient, error) {
