@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/purpleidea/mgmt/engine"
+
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
@@ -54,6 +56,9 @@ func (obj *fakeHetznerFirewallLifecycleClient) Update(_ context.Context, firewal
 
 func (obj *fakeHetznerFirewallLifecycleClient) Delete(_ context.Context, _ *hcloud.Firewall) (*hcloud.Response, error) {
 	obj.deleteCalls++
+	if obj.firewall != nil && len(obj.firewall.AppliedTo) > 0 {
+		return nil, fmt.Errorf("firewall still in use")
+	}
 	obj.firewall = nil
 	return nil, obj.err
 }
@@ -119,7 +124,6 @@ func TestHetznerFirewallCreate(t *testing.T) {
 
 	res := &HetznerFirewallRes{
 		APIToken: "token",
-		State:    HetznerStateExists,
 		Rules: []HetznerFirewallRuleSpec{
 			{
 				Direction: "in",
@@ -181,7 +185,6 @@ func TestHetznerFirewallSetRules(t *testing.T) {
 
 	res := &HetznerFirewallRes{
 		APIToken: "token",
-		State:    HetznerStateExists,
 		Rules: []HetznerFirewallRuleSpec{
 			{
 				Direction: "in",
@@ -235,7 +238,6 @@ func TestHetznerFirewallReconcileApplyTo(t *testing.T) {
 
 	res := &HetznerFirewallRes{
 		APIToken: "token",
-		State:    HetznerStateExists,
 		ApplyTo: []HetznerFirewallApplyToSpec{
 			{Type: "server", Server: "beta-cdn"},
 			{Type: "label_selector", LabelSelector: "role=cdn"},
@@ -265,10 +267,56 @@ func TestHetznerFirewallReconcileApplyTo(t *testing.T) {
 	}
 }
 
+func TestHetznerFirewallReverseDeleteDetachesBeforeDelete(t *testing.T) {
+	firewallClient := &fakeHetznerFirewallLifecycleClient{
+		firewall: &hcloud.Firewall{
+			ID:   1,
+			Name: "beta-http01",
+			AppliedTo: []hcloud.FirewallResource{
+				{
+					Type:   hcloud.FirewallResourceTypeServer,
+					Server: &hcloud.FirewallResourceServer{ID: 7},
+				},
+				{
+					Type:          hcloud.FirewallResourceTypeLabelSelector,
+					LabelSelector: &hcloud.FirewallResourceLabelSelector{Selector: "hostname=beta-api"},
+				},
+			},
+		},
+	}
+	waiter := &fakeHetznerActionWaiter{}
+
+	res := &HetznerFirewallRes{
+		APIToken:       "token",
+		WaitInterval:   HetznerWaitIntervalDefault,
+		WaitTimeout:    HetznerWaitTimeoutDefault,
+		firewallClient: firewallClient,
+		serverClient:   &fakeHetznerNamedServerLookupClient{},
+		actionWaiter:   waiter,
+	}
+	res.SetReversibleMeta(&engine.ReversibleMeta{Reversal: true})
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("CheckApply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected reverse delete to report non-converged on apply")
+	}
+	if len(firewallClient.removeCalls) != 1 {
+		t.Fatalf("expected one remove call, got %d", len(firewallClient.removeCalls))
+	}
+	if firewallClient.deleteCalls != 1 {
+		t.Fatalf("expected one delete call, got %d", firewallClient.deleteCalls)
+	}
+	if len(waiter.actions) != 1 {
+		t.Fatalf("expected waiter to observe one remove action, got %d", len(waiter.actions))
+	}
+}
+
 func TestHetznerFirewallCmpIgnoresApplyToOrder(t *testing.T) {
 	left := &HetznerFirewallRes{
 		APIToken: "token",
-		State:    HetznerStateExists,
 		Rules: []HetznerFirewallRuleSpec{
 			{Direction: "in", SourceIPs: []string{"0.0.0.0/0"}, Protocol: "tcp", Port: "22"},
 		},
@@ -282,7 +330,6 @@ func TestHetznerFirewallCmpIgnoresApplyToOrder(t *testing.T) {
 	}
 	right := &HetznerFirewallRes{
 		APIToken: "token",
-		State:    HetznerStateExists,
 		Rules: []HetznerFirewallRuleSpec{
 			{Direction: "in", SourceIPs: []string{"0.0.0.0/0"}, Protocol: "tcp", Port: "22"},
 		},

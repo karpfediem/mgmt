@@ -70,11 +70,11 @@ type HetznerFirewallApplyToSpec struct {
 // its rules and where it applies.
 type HetznerFirewallRes struct {
 	traits.Base
+	traits.Reversible
 
 	init *engine.Init
 
 	APIToken string                       `lang:"apitoken"`
-	State    string                       `lang:"state"`
 	Rules    []HetznerFirewallRuleSpec    `lang:"rules"`
 	ApplyTo  []HetznerFirewallApplyToSpec `lang:"applyto"`
 	Labels   map[string]string            `lang:"labels"`
@@ -93,7 +93,6 @@ type HetznerFirewallRes struct {
 // Default returns conservative defaults for this resource.
 func (obj *HetznerFirewallRes) Default() engine.Res {
 	return &HetznerFirewallRes{
-		State:        HetznerStateExists,
 		WaitInterval: HetznerWaitIntervalDefault,
 		WaitTimeout:  HetznerWaitTimeoutDefault,
 	}
@@ -103,9 +102,6 @@ func (obj *HetznerFirewallRes) Default() engine.Res {
 func (obj *HetznerFirewallRes) Validate() error {
 	if obj.APIToken == "" {
 		return fmt.Errorf("empty token string")
-	}
-	if err := validateHetznerState(obj.State); err != nil {
-		return err
 	}
 	for i, spec := range obj.Rules {
 		if _, err := hetznerFirewallRuleFromSpec(spec); err != nil {
@@ -159,7 +155,7 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 	}
 
 	if obj.firewall == nil {
-		if obj.State == HetznerStateAbsent {
+		if obj.ReversibleMeta().Reversal {
 			return true, nil
 		}
 		if !apply {
@@ -171,7 +167,7 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 		return false, nil
 	}
 
-	if obj.State == HetznerStateAbsent {
+	if obj.ReversibleMeta().Reversal {
 		if !apply {
 			return false, nil
 		}
@@ -226,6 +222,44 @@ func (obj *HetznerFirewallRes) CheckApply(ctx context.Context, apply bool) (bool
 	return checkOK, nil
 }
 
+// Copy returns a copy of the resource for compare and reversal handling.
+func (obj *HetznerFirewallRes) Copy() engine.CopyableRes {
+	rules := make([]HetznerFirewallRuleSpec, 0, len(obj.Rules))
+	for _, rule := range obj.Rules {
+		rules = append(rules, HetznerFirewallRuleSpec{
+			Direction:      rule.Direction,
+			SourceIPs:      slices.Clone(rule.SourceIPs),
+			DestinationIPs: slices.Clone(rule.DestinationIPs),
+			Protocol:       rule.Protocol,
+			Port:           rule.Port,
+			Description:    rule.Description,
+		})
+	}
+	return &HetznerFirewallRes{
+		APIToken:     obj.APIToken,
+		Rules:        rules,
+		ApplyTo:      slices.Clone(obj.ApplyTo),
+		Labels:       maps.Clone(obj.Labels),
+		WaitInterval: obj.WaitInterval,
+		WaitTimeout:  obj.WaitTimeout,
+	}
+}
+
+// Reversed returns the reverse resource for cleanup after the firewall has
+// disappeared from the graph.
+func (obj *HetznerFirewallRes) Reversed() (engine.ReversibleRes, error) {
+	cp, err := engine.ResCopy(obj)
+	if err != nil {
+		return nil, errwrap.Wrapf(err, "could not copy")
+	}
+	rev, ok := cp.(engine.ReversibleRes)
+	if !ok {
+		return nil, fmt.Errorf("not reversible")
+	}
+	rev.ReversibleMeta().Disabled = true
+	return rev, nil
+}
+
 func (obj *HetznerFirewallRes) create(ctx context.Context) error {
 	rules, err := hetznerFirewallRulesFromSpecs(obj.Rules)
 	if err != nil {
@@ -263,6 +297,12 @@ func (obj *HetznerFirewallRes) update(ctx context.Context) error {
 }
 
 func (obj *HetznerFirewallRes) delete(ctx context.Context) error {
+	if len(obj.firewall.AppliedTo) > 0 {
+		if err := obj.reconcileApplyTo(ctx, nil); err != nil {
+			return errwrap.Wrapf(err, "could not detach firewall resources before delete")
+		}
+		obj.firewall.AppliedTo = nil
+	}
 	_, err := obj.firewallClient.Delete(ctx, obj.firewall)
 	return err
 }
@@ -385,9 +425,6 @@ func (obj *HetznerFirewallRes) Cmp(r engine.Res) error {
 	}
 	if obj.APIToken != res.APIToken {
 		return fmt.Errorf("apitoken differs")
-	}
-	if obj.State != res.State {
-		return fmt.Errorf("state differs")
 	}
 	leftRules, err := hetznerFirewallRulesFromSpecs(obj.Rules)
 	if err != nil {
