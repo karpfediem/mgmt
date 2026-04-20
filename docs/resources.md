@@ -17,6 +17,7 @@ You might want to look at the [generated documentation](https://godoc.org/github
 for more up-to-date information about these resources.
 
 * [Augeas](#Augeas): Manipulate files using augeas.
+* [Acme](#Acme): Obtain and renew ACME certificates.
 * [Consul:KV](#ConsulKV): Set keys in a Consul datastore.
 * [Docker](#Docker):[Container](#Container) Manage docker containers.
 * [Exec](#Exec): Execute shell commands on the system.
@@ -43,6 +44,20 @@ for more up-to-date information about these resources.
 
 The augeas resource uses [augeas](http://augeas.net/) commands to manipulate
 files.
+
+## Acme
+
+The acme resource obtains and automatically renews certificates with ACME.
+Challenge selection is explicit.
+
+Supported challenge values:
+
+* `http-01`: uses the embedded HTTP challenge server.
+* `dns-01`: uses a lego-backed DNS provider selected by name with explicit
+  `dns_provider` and `dns_env` inputs.
+
+The resulting PEM material is available over Send/Recv so that resources such
+as file can write the certificate, full chain, and private key to disk.
 
 ## Docker
 

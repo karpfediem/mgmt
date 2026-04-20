@@ -1,0 +1,26 @@
+# Obtain a certificate with ACME and send the PEM material into file resources.
+#
+# The embedded HTTP-01 listener must be reachable from the CA, typically on
+# TCP port 80 for the requested domains.
+
+acme "example.com" {
+  accept_tos => true,
+  email => "ops@example.com",
+  domains => ["example.com", "www.example.com"],
+  challenge => "http-01",
+  http_address => "0.0.0.0",
+  http_port => 80,
+}
+
+file "/etc/ssl/example.com/fullchain.pem" {
+  state => "exists",
+  mode => "0644",
+}
+
+file "/etc/ssl/example.com/privkey.pem" {
+  state => "exists",
+  mode => "0600",
+}
+
+Acme["example.com"].fullchain -> File["/etc/ssl/example.com/fullchain.pem"].content
+Acme["example.com"].private_key -> File["/etc/ssl/example.com/privkey.pem"].content
