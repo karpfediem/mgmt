@@ -62,9 +62,6 @@ func init() {
 
 // HTTPServerGroupableRes is the interface that you must implement if you want
 // to allow a resource the ability to be grouped into the http server resource.
-// As an added safety, the Kind must also begin with "http:", and not have more
-// than one colon, or it must begin with http:server:, and not have any further
-// colons to avoid accidents of unwanted grouping.
 type HTTPServerGroupableRes interface {
 	engine.Res
 
@@ -722,15 +719,17 @@ func (obj *HTTPServerRes) GroupCmp(r engine.GroupableRes) error {
 		return fmt.Errorf("resource groups with a different parent name")
 	}
 
-	// http:server:foo is okay, but file or config:etcd is not
-	if !strings.HasPrefix(r.Kind(), httpServerKind+":") {
-		return fmt.Errorf("not one of our children")
+	// A main http:server resource cannot itself be grouped into another main
+	// http:server resource.
+	if r.Kind() == httpServerKind {
+		return fmt.Errorf("main http server resources do not group into each other")
 	}
 
-	// http:server:foo is okay, but http:server:foo:bar is not
+	// http:server:* children may not have more than one extra segment, and
+	// explicitly groupable non-http resources such as ACME solvers are allowed.
 	p1 := httpServerKind + ":"
 	s1 := strings.TrimPrefix(r.Kind(), p1)
-	if len(s1) != len(r.Kind()) && strings.Count(s1, ":") > 0 { // has prefix
+	if len(s1) != len(r.Kind()) && strings.Count(s1, ":") > 0 {
 		return fmt.Errorf("maximum one resource after `%s` prefix", httpServerKind)
 	}
 

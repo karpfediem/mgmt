@@ -132,6 +132,69 @@ func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
 	}
 }
 
+func TestAcmeHTTP01SolverServesThroughHTTPServerGrouping(t *testing.T) {
+	world := newFakeWorld("solver-a")
+
+	server := &HTTPServerRes{
+		Address: ":80",
+	}
+	server.SetName("public-80")
+
+	solver := &AcmeHTTP01SolverRes{
+		Server: "public-80",
+		Hosts:  []string{"example.com"},
+	}
+	solver.SetName("public-http01")
+
+	if err := server.GroupCmp(solver); err != nil {
+		t.Fatalf("GroupCmp failed: %v", err)
+	}
+	if err := server.GroupRes(solver); err != nil {
+		t.Fatalf("GroupRes failed: %v", err)
+	}
+
+	if err := server.Init(&engine.Init{
+		Hostname: "solver-a",
+		Event:    func(context.Context) error { return nil },
+		Send:     func(interface{}) error { return nil },
+		World:    world,
+		Logf:     func(string, ...interface{}) {},
+	}); err != nil {
+		t.Fatalf("server Init failed: %v", err)
+	}
+
+	challenge := acmeHTTP01Challenge{
+		Attempt:      "attempt-1",
+		Domain:       "example.com",
+		Token:        "token",
+		Path:         "/.well-known/acme-challenge/token",
+		Body:         "key-authorization",
+		ChallengeURL: "https://ca.test/challenge/1",
+	}
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), world, solver.Name(), &acmeHTTP01ChallengeState{
+		Challenges: map[string]acmeHTTP01Challenge{
+			challenge.key(): challenge,
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
+	}
+	if err := solver.syncWorldState(context.Background()); err != nil {
+		t.Fatalf("syncWorldState failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com"+challenge.Path, nil)
+	req.Host = "example.com"
+
+	recorder := httptest.NewRecorder()
+	server.handler()(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: %d", recorder.Code)
+	}
+	if recorder.Body.String() != challenge.Body {
+		t.Fatalf("unexpected challenge body: %q", recorder.Body.String())
+	}
+}
+
 func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
 	world := newFakeWorld("solver-a")
 	sends := &AcmeHTTP01SolverSends{}
