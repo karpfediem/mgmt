@@ -33,9 +33,11 @@ package local
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestWrite(t *testing.T) {
@@ -58,5 +60,59 @@ func TestWrite(t *testing.T) {
 	if err := valueRemove(context.Background(), tmpdir, key); err != nil {
 		t.Errorf("error: %+v", err)
 		//return
+	}
+}
+
+func init() {
+	gob.Register(map[string]string{})
+}
+
+func newTestValueAPI(t *testing.T) *Value {
+	t.Helper()
+
+	value := &Value{}
+	value.Init(&ValueInit{
+		Prefix: t.TempDir(),
+		Logf:   func(string, ...interface{}) {},
+	})
+	return value
+}
+
+func TestValueSetDeepEqualUncomparableDoesNotNotify(t *testing.T) {
+	api := newTestValueAPI(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watch, err := api.ValueWatch(ctx, "test")
+	if err != nil {
+		t.Fatalf("ValueWatch failed: %v", err)
+	}
+
+	select {
+	case <-watch: // startup event
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for startup watch event")
+	}
+
+	value := map[string]string{"alpha": "one"}
+	if err := api.ValueSet(ctx, "test", value); err != nil {
+		t.Fatalf("first ValueSet failed: %v", err)
+	}
+
+	select {
+	case <-watch:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for change watch event")
+	}
+
+	duplicate := map[string]string{"alpha": "one"}
+	if err := api.ValueSet(ctx, "test", duplicate); err != nil {
+		t.Fatalf("second ValueSet failed: %v", err)
+	}
+
+	select {
+	case <-watch:
+		t.Fatalf("unexpected watch event for deep-equal uncomparable value")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

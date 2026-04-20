@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -183,7 +184,9 @@ func (obj *Value) ValueSet(ctx context.Context, key string, value interface{}) e
 	if !exists && value == nil {
 		return nil // already in the correct state
 	}
-	if exists && v == value { // XXX: reflect.DeepEqual(v, value) ?
+	// Stored values may be structs containing maps or slices, so interface
+	// equality is not safe here.
+	if exists && reflect.DeepEqual(v, value) {
 		return nil // already in the correct state
 	}
 

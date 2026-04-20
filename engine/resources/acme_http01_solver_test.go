@@ -33,6 +33,7 @@ package resources
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -263,4 +264,100 @@ func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
 	if err := res.AcceptHTTP(req); err == nil {
 		t.Fatalf("expected AcceptHTTP to reject an unhandled host")
 	}
+}
+
+func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
+	api := testLocalAPI(t)
+
+	res := &AcmeHTTP01SolverRes{
+		Server: "public-80",
+		Hosts:  []string{"example.com", "www.example.com"},
+	}
+	res.SetName("public-http01")
+	if err := res.Init(&engine.Init{
+		Event: func(ctx context.Context) error { return nil },
+		Send:  func(interface{}) error { return nil },
+		Local: api,
+		Logf:  func(string, ...interface{}) {},
+	}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errCh <- fmt.Errorf("panic in Watch: %v", r)
+			}
+		}()
+		errCh <- res.Watch(ctx)
+	}()
+
+	challenge1 := acmeHTTP01Challenge{
+		Attempt: "attempt-1",
+		Domain:  "example.com",
+		Token:   "token-1",
+		Path:    http01.ChallengePath("token-1"),
+		Body:    "key-authorization-1",
+	}
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), api, res.Name(), &acmeHTTP01ChallengeState{
+		Challenges: map[string]acmeHTTP01Challenge{
+			challenge1.key(): challenge1,
+		},
+	}); err != nil {
+		t.Fatalf("storing first challenge state failed: %v", err)
+	}
+	waitForHTTP01PresentationEntries(t, api, res.Name(), 1)
+
+	challenge2 := acmeHTTP01Challenge{
+		Attempt: "attempt-1",
+		Domain:  "www.example.com",
+		Token:   "token-2",
+		Path:    http01.ChallengePath("token-2"),
+		Body:    "key-authorization-2",
+	}
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), api, res.Name(), &acmeHTTP01ChallengeState{
+		Challenges: map[string]acmeHTTP01Challenge{
+			challenge1.key(): challenge1,
+			challenge2.key(): challenge2,
+		},
+	}); err != nil {
+		t.Fatalf("storing second challenge state failed: %v", err)
+	}
+	waitForHTTP01PresentationEntries(t, api, res.Name(), 2)
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Watch returned unexpected error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for Watch to exit")
+	}
+}
+
+func waitForHTTP01PresentationEntries(t *testing.T, api *local.API, solver string, count int) {
+	t.Helper()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := loadAcmeHTTP01PresentationState(context.Background(), api, solver)
+		if err != nil {
+			t.Fatalf("loadAcmeHTTP01PresentationState failed: %v", err)
+		}
+		if len(state.Entries) == count {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	state, err := loadAcmeHTTP01PresentationState(context.Background(), api, solver)
+	if err != nil {
+		t.Fatalf("loadAcmeHTTP01PresentationState failed: %v", err)
+	}
+	t.Fatalf("timed out waiting for %d presentation entries, got %d", count, len(state.Entries))
 }
