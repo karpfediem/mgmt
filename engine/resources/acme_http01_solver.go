@@ -31,263 +31,20 @@ package resources
 
 import (
 	"context"
-	"encoding/gob"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/purpleidea/mgmt/engine"
 	"github.com/purpleidea/mgmt/engine/traits"
 	"github.com/purpleidea/mgmt/util/errwrap"
-
-	"github.com/go-acme/lego/v4/challenge/http01"
 )
 
-const (
-	acmeHTTP01SolverKind       = "acme:solver:http01"
-	acmeHTTP01ProviderTimeout  = 30 * time.Second
-	acmeHTTP01ProviderWaitPoll = 250 * time.Millisecond
-)
-
-var acmeHTTP01LocalMu sync.Mutex
+const acmeHTTP01SolverKind = "acme:solver:http01"
 
 func init() {
-	gob.Register(acmeHTTP01ChallengeState{})
-	gob.Register(acmeHTTP01PresentationState{})
-
 	engine.RegisterResource(acmeHTTP01SolverKind, func() engine.Res { return &AcmeHTTP01SolverRes{} })
-}
-
-type acmeLocalValueAPI interface {
-	ValueGet(context.Context, string) (interface{}, error)
-	ValueSet(context.Context, string, interface{}) error
-	ValueWatch(context.Context, string) (chan struct{}, error)
-}
-
-type acmeHTTP01Challenge struct {
-	Attempt string
-	Domain  string
-	Token   string
-	Path    string
-	Body    string
-}
-
-func (obj acmeHTTP01Challenge) key() string {
-	return strings.Join([]string{
-		obj.Attempt,
-		normalizeHTTPHost(obj.Domain),
-		obj.Token,
-	}, "\x00")
-}
-
-type acmeHTTP01ChallengeState struct {
-	Challenges map[string]acmeHTTP01Challenge
-}
-
-type acmeHTTP01PresentationEntry struct {
-	Attempt string
-	Domain  string
-	Path    string
-	Ready   bool
-	Error   string
-}
-
-type acmeHTTP01PresentationState struct {
-	Entries map[string]acmeHTTP01PresentationEntry
-}
-
-func acmeHTTP01ChallengeStateKey(solver string) string {
-	return "acme-http01-challenges-" + url.QueryEscape(strings.TrimSpace(solver))
-}
-
-func acmeHTTP01PresentationStateKey(solver string) string {
-	return "acme-http01-presentation-" + url.QueryEscape(strings.TrimSpace(solver))
-}
-
-func loadAcmeHTTP01ChallengeState(ctx context.Context, localAPI acmeLocalValueAPI, solver string) (*acmeHTTP01ChallengeState, error) {
-	value, err := localAPI.ValueGet(ctx, acmeHTTP01ChallengeStateKey(solver))
-	if err != nil {
-		return nil, err
-	}
-	switch x := value.(type) {
-	case nil:
-		return &acmeHTTP01ChallengeState{Challenges: map[string]acmeHTTP01Challenge{}}, nil
-	case acmeHTTP01ChallengeState:
-		if x.Challenges == nil {
-			x.Challenges = map[string]acmeHTTP01Challenge{}
-		}
-		return &x, nil
-	case *acmeHTTP01ChallengeState:
-		if x == nil {
-			return &acmeHTTP01ChallengeState{Challenges: map[string]acmeHTTP01Challenge{}}, nil
-		}
-		clone := *x
-		if clone.Challenges == nil {
-			clone.Challenges = map[string]acmeHTTP01Challenge{}
-		}
-		return &clone, nil
-	default:
-		return nil, fmt.Errorf("unexpected HTTP-01 challenge state type: %T", value)
-	}
-}
-
-func storeAcmeHTTP01ChallengeState(ctx context.Context, localAPI acmeLocalValueAPI, solver string, state *acmeHTTP01ChallengeState) error {
-	if state == nil || len(state.Challenges) == 0 {
-		return localAPI.ValueSet(ctx, acmeHTTP01ChallengeStateKey(solver), nil)
-	}
-	return localAPI.ValueSet(ctx, acmeHTTP01ChallengeStateKey(solver), *state)
-}
-
-func loadAcmeHTTP01PresentationState(ctx context.Context, localAPI acmeLocalValueAPI, solver string) (*acmeHTTP01PresentationState, error) {
-	value, err := localAPI.ValueGet(ctx, acmeHTTP01PresentationStateKey(solver))
-	if err != nil {
-		return nil, err
-	}
-	switch x := value.(type) {
-	case nil:
-		return &acmeHTTP01PresentationState{Entries: map[string]acmeHTTP01PresentationEntry{}}, nil
-	case acmeHTTP01PresentationState:
-		if x.Entries == nil {
-			x.Entries = map[string]acmeHTTP01PresentationEntry{}
-		}
-		return &x, nil
-	case *acmeHTTP01PresentationState:
-		if x == nil {
-			return &acmeHTTP01PresentationState{Entries: map[string]acmeHTTP01PresentationEntry{}}, nil
-		}
-		clone := *x
-		if clone.Entries == nil {
-			clone.Entries = map[string]acmeHTTP01PresentationEntry{}
-		}
-		return &clone, nil
-	default:
-		return nil, fmt.Errorf("unexpected HTTP-01 presentation state type: %T", value)
-	}
-}
-
-func storeAcmeHTTP01PresentationState(ctx context.Context, localAPI acmeLocalValueAPI, solver string, state *acmeHTTP01PresentationState) error {
-	if state == nil || len(state.Entries) == 0 {
-		return localAPI.ValueSet(ctx, acmeHTTP01PresentationStateKey(solver), nil)
-	}
-	return localAPI.ValueSet(ctx, acmeHTTP01PresentationStateKey(solver), *state)
-}
-
-func mutateAcmeHTTP01ChallengeState(ctx context.Context, localAPI acmeLocalValueAPI, solver string, fn func(*acmeHTTP01ChallengeState) error) error {
-	acmeHTTP01LocalMu.Lock()
-	defer acmeHTTP01LocalMu.Unlock()
-
-	state, err := loadAcmeHTTP01ChallengeState(ctx, localAPI, solver)
-	if err != nil {
-		return err
-	}
-	if err := fn(state); err != nil {
-		return err
-	}
-	return storeAcmeHTTP01ChallengeState(ctx, localAPI, solver, state)
-}
-
-type acmeHTTP01Provider struct {
-	localAPI    acmeLocalValueAPI
-	solver      string
-	attempt     string
-	waitTimeout time.Duration
-}
-
-func newAcmeHTTP01Provider(localAPI acmeLocalValueAPI, solver string) (*acmeHTTP01Provider, error) {
-	if localAPI == nil {
-		return nil, fmt.Errorf("the Local API is required for the explicit http-01 solver")
-	}
-	solver = strings.TrimSpace(solver)
-	if solver == "" {
-		return nil, fmt.Errorf("the solver name must not be empty")
-	}
-	return &acmeHTTP01Provider{
-		localAPI:    localAPI,
-		solver:      solver,
-		attempt:     fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
-		waitTimeout: acmeHTTP01ProviderTimeout,
-	}, nil
-}
-
-func (obj *acmeHTTP01Provider) Present(domain, token, keyAuth string) error {
-	challenge := acmeHTTP01Challenge{
-		Attempt: obj.attempt,
-		Domain:  normalizeHTTPHost(domain),
-		Token:   token,
-		Path:    http01.ChallengePath(token),
-		Body:    keyAuth,
-	}
-
-	ctx := context.Background()
-	if err := mutateAcmeHTTP01ChallengeState(ctx, obj.localAPI, obj.solver, func(state *acmeHTTP01ChallengeState) error {
-		if state.Challenges == nil {
-			state.Challenges = map[string]acmeHTTP01Challenge{}
-		}
-		state.Challenges[challenge.key()] = challenge
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	if err := obj.waitUntilReady(challenge); err != nil {
-		_ = obj.CleanUp(domain, token, keyAuth)
-		return err
-	}
-
-	return nil
-}
-
-func (obj *acmeHTTP01Provider) waitUntilReady(challenge acmeHTTP01Challenge) error {
-	ctx, cancel := context.WithTimeout(context.Background(), obj.waitTimeout)
-	defer cancel()
-
-	ch, err := obj.localAPI.ValueWatch(ctx, acmeHTTP01PresentationStateKey(obj.solver))
-	if err != nil {
-		return err
-	}
-
-	for {
-		state, err := loadAcmeHTTP01PresentationState(ctx, obj.localAPI, obj.solver)
-		if err != nil {
-			return err
-		}
-		if entry, exists := state.Entries[challenge.key()]; exists {
-			if entry.Error != "" {
-				return fmt.Errorf("%s", entry.Error)
-			}
-			if entry.Ready {
-				return nil
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for %s[%s] to present %s", acmeHTTP01SolverKind, obj.solver, challenge.Path)
-		case <-ch:
-		case <-time.After(acmeHTTP01ProviderWaitPoll):
-		}
-	}
-}
-
-func (obj *acmeHTTP01Provider) CleanUp(domain, token, keyAuth string) error {
-	challenge := acmeHTTP01Challenge{
-		Attempt: obj.attempt,
-		Domain:  normalizeHTTPHost(domain),
-		Token:   token,
-		Path:    http01.ChallengePath(token),
-		Body:    keyAuth,
-	}
-
-	return mutateAcmeHTTP01ChallengeState(context.Background(), obj.localAPI, obj.solver, func(state *acmeHTTP01ChallengeState) error {
-		delete(state.Challenges, challenge.key())
-		if len(state.Challenges) == 0 {
-			state.Challenges = nil
-		}
-		return nil
-	})
 }
 
 // AcmeHTTP01SolverRes presents http-01 ACME challenge material through an
@@ -355,12 +112,32 @@ func (obj *AcmeHTTP01SolverRes) acceptsChallenge(challenge acmeHTTP01Challenge) 
 	return false
 }
 
-func (obj *AcmeHTTP01SolverRes) activeChallenge(host, requestPath string) (acmeHTTP01Challenge, bool) {
+func (obj *AcmeHTTP01SolverRes) challengeSnapshot() map[string]acmeHTTP01Challenge {
 	obj.mutex.RLock()
 	defer obj.mutex.RUnlock()
 
+	challenges := make(map[string]acmeHTTP01Challenge, len(obj.challenges))
+	for key, challenge := range obj.challenges {
+		challenges[key] = challenge
+	}
+	return challenges
+}
+
+func (obj *AcmeHTTP01SolverRes) presentationSnapshot() map[string]acmeHTTP01PresentationEntry {
+	obj.mutex.RLock()
+	defer obj.mutex.RUnlock()
+
+	presentation := make(map[string]acmeHTTP01PresentationEntry, len(obj.presentation))
+	for key, entry := range obj.presentation {
+		presentation[key] = entry
+	}
+	return presentation
+}
+
+func (obj *AcmeHTTP01SolverRes) activeChallenge(host, requestPath string) (acmeHTTP01Challenge, bool) {
+	challenges := obj.challengeSnapshot()
 	host = normalizeHTTPHost(host)
-	for _, challenge := range obj.challenges {
+	for _, challenge := range challenges {
 		if !obj.acceptsChallenge(challenge) {
 			continue
 		}
@@ -405,6 +182,10 @@ func (obj *AcmeHTTP01SolverRes) ServeHTTP(w http.ResponseWriter, req *http.Reque
 
 // Validate checks if the resource data structure was populated correctly.
 func (obj *AcmeHTTP01SolverRes) Validate() error {
+	if strings.TrimSpace(obj.Server) == "" {
+		return fmt.Errorf("the Server field must not be empty")
+	}
+
 	for _, host := range obj.Hosts {
 		host = strings.TrimSpace(host)
 		if host == "" {
@@ -423,9 +204,10 @@ func (obj *AcmeHTTP01SolverRes) Validate() error {
 // Init runs some startup code for this resource.
 func (obj *AcmeHTTP01SolverRes) Init(init *engine.Init) error {
 	obj.init = init
-	if obj.init.Local == nil {
-		return fmt.Errorf("the Local API is required")
+	if obj.init.World == nil {
+		return fmt.Errorf("the World API is required")
 	}
+
 	obj.mutex = &sync.RWMutex{}
 	obj.challenges = map[string]acmeHTTP01Challenge{}
 	obj.presentation = map[string]acmeHTTP01PresentationEntry{}
@@ -434,11 +216,14 @@ func (obj *AcmeHTTP01SolverRes) Init(init *engine.Init) error {
 
 // Cleanup is run by the engine to clean up after the resource is done.
 func (obj *AcmeHTTP01SolverRes) Cleanup() error {
-	return nil
+	if obj.init == nil || obj.init.World == nil {
+		return nil
+	}
+	return storeAcmeHTTP01PresentationState(context.Background(), obj.init.World, obj.Name(), nil)
 }
 
-func (obj *AcmeHTTP01SolverRes) syncLocalState(ctx context.Context) error {
-	state, err := loadAcmeHTTP01ChallengeState(ctx, obj.init.Local, obj.Name())
+func (obj *AcmeHTTP01SolverRes) syncWorldState(ctx context.Context) error {
+	state, err := loadAcmeHTTP01ChallengeState(ctx, obj.init.World, obj.Name())
 	if err != nil {
 		return err
 	}
@@ -463,7 +248,7 @@ func (obj *AcmeHTTP01SolverRes) syncLocalState(ctx context.Context) error {
 		presentation[key] = entry
 	}
 
-	if err := storeAcmeHTTP01PresentationState(ctx, obj.init.Local, obj.Name(), &acmeHTTP01PresentationState{Entries: presentation}); err != nil {
+	if err := storeAcmeHTTP01PresentationState(ctx, obj.init.World, obj.Name(), &acmeHTTP01PresentationState{Entries: presentation}); err != nil {
 		return errwrap.Wrapf(err, "could not store HTTP-01 presentation state")
 	}
 
@@ -477,12 +262,12 @@ func (obj *AcmeHTTP01SolverRes) syncLocalState(ctx context.Context) error {
 
 // Watch is the primary listener for this resource and it outputs events.
 func (obj *AcmeHTTP01SolverRes) Watch(ctx context.Context) error {
-	ch, err := obj.init.Local.ValueWatch(ctx, acmeHTTP01ChallengeStateKey(obj.Name()))
+	ch, err := obj.init.World.StrWatch(ctx, acmeHTTP01ChallengeStateKey(obj.Name()))
 	if err != nil {
 		return err
 	}
 
-	if err := obj.syncLocalState(ctx); err != nil {
+	if err := obj.syncWorldState(ctx); err != nil {
 		return err
 	}
 	if err := obj.init.Event(ctx); err != nil {
@@ -491,10 +276,17 @@ func (obj *AcmeHTTP01SolverRes) Watch(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ch:
-			if err := obj.syncLocalState(ctx); err != nil {
+		case err, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err != nil {
 				return err
 			}
+			if err := obj.syncWorldState(ctx); err != nil {
+				return err
+			}
+
 		case <-ctx.Done():
 			return nil
 		}
@@ -524,11 +316,12 @@ func (obj *AcmeHTTP01SolverRes) CheckApply(ctx context.Context, apply bool) (boo
 	_ = ctx
 	_ = apply
 
-	obj.mutex.RLock()
-	challengeCount := len(obj.challenges)
+	challenges := obj.challengeSnapshot()
+	presentation := obj.presentationSnapshot()
+	challengeCount := len(challenges)
 	ready := challengeCount > 0
 	var firstError string
-	for _, entry := range obj.presentation {
+	for _, entry := range presentation {
 		if entry.Error != "" {
 			if firstError == "" {
 				firstError = entry.Error
@@ -536,7 +329,6 @@ func (obj *AcmeHTTP01SolverRes) CheckApply(ctx context.Context, apply bool) (boo
 			ready = false
 		}
 	}
-	obj.mutex.RUnlock()
 
 	if err := obj.init.Send(&AcmeHTTP01SolverSends{
 		Pending:        challengeCount > 0,

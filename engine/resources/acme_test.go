@@ -52,13 +52,17 @@ import (
 	"github.com/go-acme/lego/v4/registration"
 )
 
-func fakeAcmeInit(t *testing.T, refresh bool) (*engine.Init, func() *AcmeSends) {
+func fakeAcmeInit(t *testing.T, refresh bool, world *fakeWorld) (*engine.Init, func() *AcmeSends) {
 	t.Helper()
 
 	tmpdir := fmt.Sprintf("%s/", t.TempDir())
 	sends := &AcmeSends{}
+	if world == nil {
+		world = newFakeWorld("test-host")
+	}
 
 	return &engine.Init{
+			Hostname: "test-host",
 			Event: func(ctx context.Context) error {
 				return nil
 			},
@@ -76,7 +80,8 @@ func fakeAcmeInit(t *testing.T, refresh bool) (*engine.Init, func() *AcmeSends) 
 			VarDir: func(p string) (string, error) {
 				return path.Join(tmpdir, p), nil
 			},
-			Logf: func(string, ...interface{}) {},
+			World: world,
+			Logf:  func(string, ...interface{}) {},
 		}, func() *AcmeSends {
 			copy := *sends
 			return &copy
@@ -84,14 +89,18 @@ func fakeAcmeInit(t *testing.T, refresh bool) (*engine.Init, func() *AcmeSends) 
 }
 
 type fakeAcmeClient struct {
-	accountKeyPEM string
-	registration  *registration.Resource
-	obtainResult  *certificate.Resource
-	renewResult   *certificate.Resource
+	accountKeyPEM  string
+	registration   *registration.Resource
+	obtainResult   *certificate.Resource
+	renewResult    *certificate.Resource
+	beginResult    *acmeHTTP01OrderState
+	completeResult *certificate.Resource
 
-	ensureCalls int
-	obtainCalls int
-	renewCalls  int
+	ensureCalls   int
+	obtainCalls   int
+	renewCalls    int
+	beginCalls    int
+	completeCalls int
 }
 
 func (obj *fakeAcmeClient) AccountKeyPEM() string {
@@ -111,6 +120,16 @@ func (obj *fakeAcmeClient) Obtain(req certificate.ObtainRequest) (*certificate.R
 func (obj *fakeAcmeClient) Renew(certRes certificate.Resource, opts *certificate.RenewOptions) (*certificate.Resource, error) {
 	obj.renewCalls++
 	return obj.renewResult, nil
+}
+
+func (obj *fakeAcmeClient) BeginHTTP01(req acmeHTTP01IssueRequest) (*acmeHTTP01OrderState, error) {
+	obj.beginCalls++
+	return obj.beginResult, nil
+}
+
+func (obj *fakeAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*certificate.Resource, error) {
+	obj.completeCalls++
+	return obj.completeResult, nil
 }
 
 func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
@@ -134,9 +153,9 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 		AcceptTOS: true,
 		Email:     "ops@example.com",
 		Domains:   []string{"example.com", "www.example.com"},
-		Challenge: acmeChallengeHTTP01,
+		Challenge: acmeChallengeDNS01,
 	}
-	init, sent := fakeAcmeInit(t, false)
+	init, sent := fakeAcmeInit(t, false, nil)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
@@ -202,10 +221,10 @@ func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
 		AcceptTOS:       true,
 		Email:           "ops@example.com",
 		Domains:         []string{"example.com"},
-		Challenge:       acmeChallengeHTTP01,
+		Challenge:       acmeChallengeDNS01,
 		RenewBeforeDays: 30,
 	}
-	init, sent := fakeAcmeInit(t, false)
+	init, sent := fakeAcmeInit(t, false, nil)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
@@ -311,25 +330,66 @@ func TestAcmeValidateRejectsMissingDNSProviderEnv(t *testing.T) {
 	}
 }
 
-func TestAcmeCheckApplyWaitsForHTTP01Ready(t *testing.T) {
+func TestAcmeValidateRejectsMissingHTTP01Solver(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.AcceptTOS = true
+	res.Email = "ops@example.com"
+	res.Domains = []string{"example.com"}
+	res.Challenge = acmeChallengeHTTP01
+
+	err := res.Validate()
+	if err == nil || !strings.Contains(err.Error(), "Solver") {
+		t.Fatalf("expected solver validation error, got: %v", err)
+	}
+}
+
+func TestAcmeCheckApplyPreparesHTTP01BeforeReady(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 	http01Ready := false
+	world := newFakeWorld("test-host")
+
+	orderState := &acmeHTTP01OrderState{
+		Attempt:        "attempt-1",
+		Domains:        []string{"example.com"},
+		KeyType:        "2048",
+		MustStaple:     false,
+		PreferredChain: "",
+		OrderURL:       "https://example.test/order/1",
+		FinalizeURL:    "https://example.test/order/1/finalize",
+		PrivateKeyPEM:  "PRIVATE KEY\n",
+		CSRPEM:         "CSR\n",
+		Challenges: map[string]acmeHTTP01Challenge{
+			"challenge-1": {
+				Attempt:      "attempt-1",
+				Domain:       "example.com",
+				Token:        "token",
+				Path:         "/.well-known/acme-challenge/token",
+				Body:         "key-authorization",
+				ChallengeURL: "https://example.test/challenge/1",
+			},
+		},
+	}
+	client := &fakeAcmeClient{
+		accountKeyPEM: "ACCOUNT\n",
+		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
+		beginResult:   orderState,
+	}
 
 	res := &AcmeRes{
 		AcceptTOS:   true,
 		Email:       "ops@example.com",
 		Domains:     []string{"example.com"},
 		Challenge:   acmeChallengeHTTP01,
+		Solver:      "public-http01",
 		HTTP01Ready: &http01Ready,
 	}
-	init, sent := fakeAcmeInit(t, false)
+	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 	res.nowFn = func() time.Time { return now }
 	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
-		t.Fatalf("clientFactory should not be called while http01_ready is false")
-		return nil, nil
+		return client, nil
 	}
 
 	checkOK, err := res.CheckApply(context.Background(), true)
@@ -337,18 +397,165 @@ func TestAcmeCheckApplyWaitsForHTTP01Ready(t *testing.T) {
 		t.Fatalf("checkapply failed: %v", err)
 	}
 	if checkOK {
-		t.Fatalf("expected checkOK to be false while waiting for http01_ready")
+		t.Fatalf("expected checkOK to be false while preparing http-01")
+	}
+	if client.beginCalls != 1 {
+		t.Fatalf("expected one BeginHTTP01 call, got %d", client.beginCalls)
+	}
+	if client.completeCalls != 0 {
+		t.Fatalf("expected zero CompleteHTTP01 calls, got %d", client.completeCalls)
 	}
 
 	payload := sent()
 	if !payload.Pending {
-		t.Fatalf("expected pending to be true while waiting for http01_ready")
+		t.Fatalf("expected pending to be true while preparing http-01")
 	}
 	if !payload.HTTP01Pending {
-		t.Fatalf("expected http01_pending to be true while waiting for http01_ready")
+		t.Fatalf("expected http01_pending to be true while preparing http-01")
 	}
 	if payload.PrivateKey != "" {
 		t.Fatalf("expected no private key material while waiting for issuance")
+	}
+
+	state, err := res.loadState()
+	if err != nil {
+		t.Fatalf("loadState failed: %v", err)
+	}
+	if state.HTTP01 == nil {
+		t.Fatalf("expected pending HTTP-01 order state to be persisted")
+	}
+
+	challenges, err := loadAcmeHTTP01ChallengeState(context.Background(), world, res.Solver)
+	if err != nil {
+		t.Fatalf("loadAcmeHTTP01ChallengeState failed: %v", err)
+	}
+	if len(challenges.Challenges) != 1 {
+		t.Fatalf("expected one published challenge, got %d", len(challenges.Challenges))
+	}
+}
+
+func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	http01Ready := true
+	world := newFakeWorld("test-host")
+	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
+
+	orderState := &acmeHTTP01OrderState{
+		Attempt:        "attempt-1",
+		Domains:        []string{"example.com"},
+		KeyType:        "2048",
+		MustStaple:     false,
+		PreferredChain: "",
+		OrderURL:       "https://example.test/order/1",
+		FinalizeURL:    "https://example.test/order/1/finalize",
+		PrivateKeyPEM:  "PRIVATE KEY\n",
+		CSRPEM:         "CSR\n",
+		Challenges: map[string]acmeHTTP01Challenge{
+			"challenge-1": {
+				Attempt:      "attempt-1",
+				Domain:       "example.com",
+				Token:        "token",
+				Path:         "/.well-known/acme-challenge/token",
+				Body:         "key-authorization",
+				ChallengeURL: "https://example.test/challenge/1",
+			},
+		},
+	}
+	client := &fakeAcmeClient{
+		accountKeyPEM: "ACCOUNT\n",
+		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
+		completeResult: &certificate.Resource{
+			Domain:            "example.com",
+			CertURL:           "https://example.test/cert/1",
+			CertStableURL:     "https://example.test/cert/stable/1",
+			PrivateKey:        []byte(key),
+			Certificate:       []byte(fullchain),
+			IssuerCertificate: []byte(issuer),
+		},
+	}
+
+	res := &AcmeRes{
+		AcceptTOS:   true,
+		Email:       "ops@example.com",
+		Domains:     []string{"example.com"},
+		Challenge:   acmeChallengeHTTP01,
+		Solver:      "public-http01",
+		HTTP01Ready: &http01Ready,
+	}
+	init, sent := fakeAcmeInit(t, false, world)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
+		return client, nil
+	}
+
+	if err := res.saveState(&acmeStoredState{
+		Version:              1,
+		Email:                "ops@example.com",
+		DirectoryURL:         res.DirectoryURL,
+		Domains:              []string{"example.com"},
+		KeyType:              "2048",
+		AccountPrivateKeyPEM: "ACCOUNT\n",
+		Registration:         &registration.Resource{URI: "https://example.test/acct/1"},
+		HTTP01:               orderState,
+	}); err != nil {
+		t.Fatalf("saveState failed: %v", err)
+	}
+
+	if err := storeAcmeHTTP01PresentationState(context.Background(), world, res.Solver, &acmeHTTP01PresentationState{
+		Entries: map[string]acmeHTTP01PresentationEntry{
+			"challenge-1": {
+				Attempt: "attempt-1",
+				Domain:  "example.com",
+				Path:    "/.well-known/acme-challenge/token",
+				Ready:   true,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeHTTP01PresentationState failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false after completing http-01 in this cycle")
+	}
+	if client.completeCalls != 1 {
+		t.Fatalf("expected one CompleteHTTP01 call, got %d", client.completeCalls)
+	}
+
+	payload := sent()
+	if payload.Pending {
+		t.Fatalf("expected pending to be false after successful issuance")
+	}
+	if payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be false after successful issuance")
+	}
+	if payload.Certificate != normalizePEMString(leaf) {
+		t.Fatalf("unexpected certificate payload")
+	}
+
+	state, err := res.loadState()
+	if err != nil {
+		t.Fatalf("loadState failed: %v", err)
+	}
+	if state.HTTP01 != nil {
+		t.Fatalf("expected pending HTTP-01 order state to be cleared")
+	}
+	if state.PrivateKeyPEM != normalizePEMString(key) {
+		t.Fatalf("expected issued private key to be persisted")
+	}
+
+	challenges, err := loadAcmeHTTP01ChallengeState(context.Background(), world, res.Solver)
+	if err != nil {
+		t.Fatalf("loadAcmeHTTP01ChallengeState failed: %v", err)
+	}
+	if len(challenges.Challenges) != 0 {
+		t.Fatalf("expected published challenges to be cleared")
 	}
 }
 
@@ -361,7 +568,7 @@ func TestAcmeCheckApplyDNS01PendingDoesNotSetHTTP01Pending(t *testing.T) {
 		Domains:   []string{"example.com"},
 		Challenge: acmeChallengeDNS01,
 	}
-	init, sent := fakeAcmeInit(t, false)
+	init, sent := fakeAcmeInit(t, false, nil)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}

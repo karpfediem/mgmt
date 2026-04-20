@@ -40,98 +40,10 @@ import (
 	"time"
 
 	"github.com/purpleidea/mgmt/engine"
-	"github.com/purpleidea/mgmt/engine/local"
-
-	"github.com/go-acme/lego/v4/challenge/http01"
 )
 
-func testLocalAPI(t *testing.T) *local.API {
-	t.Helper()
-
-	return (&local.API{
-		Prefix: t.TempDir(),
-		Logf:   func(string, ...interface{}) {},
-	}).Init()
-}
-
-func TestAcmeHTTP01ProviderPresentAndCleanUp(t *testing.T) {
-	api := testLocalAPI(t)
-
-	provider, err := newAcmeHTTP01Provider(api, "public-http01")
-	if err != nil {
-		t.Fatalf("newAcmeHTTP01Provider failed: %v", err)
-	}
-
-	ctx := context.Background()
-	watch, err := api.ValueWatch(ctx, acmeHTTP01ChallengeStateKey("public-http01"))
-	if err != nil {
-		t.Fatalf("ValueWatch failed: %v", err)
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		for {
-			select {
-			case <-watch:
-				state, err := loadAcmeHTTP01ChallengeState(ctx, api, "public-http01")
-				if err != nil {
-					errCh <- err
-					return
-				}
-				if len(state.Challenges) == 0 {
-					continue
-				}
-
-				presentation := &acmeHTTP01PresentationState{
-					Entries: map[string]acmeHTTP01PresentationEntry{},
-				}
-				for key, challenge := range state.Challenges {
-					presentation.Entries[key] = acmeHTTP01PresentationEntry{
-						Attempt: challenge.Attempt,
-						Domain:  challenge.Domain,
-						Path:    challenge.Path,
-						Ready:   true,
-					}
-				}
-				errCh <- storeAcmeHTTP01PresentationState(ctx, api, "public-http01", presentation)
-				return
-			case <-time.After(5 * time.Second):
-				errCh <- context.DeadlineExceeded
-				return
-			}
-		}
-	}()
-
-	if err := provider.Present("example.com", "token", "key-authorization"); err != nil {
-		t.Fatalf("Present failed: %v", err)
-	}
-	if err := <-errCh; err != nil {
-		t.Fatalf("presentation helper failed: %v", err)
-	}
-
-	state, err := loadAcmeHTTP01ChallengeState(ctx, api, "public-http01")
-	if err != nil {
-		t.Fatalf("loadAcmeHTTP01ChallengeState failed: %v", err)
-	}
-	if len(state.Challenges) != 1 {
-		t.Fatalf("expected one active challenge, got %d", len(state.Challenges))
-	}
-
-	if err := provider.CleanUp("example.com", "token", "key-authorization"); err != nil {
-		t.Fatalf("CleanUp failed: %v", err)
-	}
-
-	state, err = loadAcmeHTTP01ChallengeState(ctx, api, "public-http01")
-	if err != nil {
-		t.Fatalf("loadAcmeHTTP01ChallengeState failed: %v", err)
-	}
-	if len(state.Challenges) != 0 {
-		t.Fatalf("expected no active challenges after cleanup, got %d", len(state.Challenges))
-	}
-}
-
 func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
-	api := testLocalAPI(t)
+	world := newFakeWorld("solver-a")
 	sends := &AcmeHTTP01SolverSends{}
 
 	res := &AcmeHTTP01SolverRes{
@@ -140,7 +52,8 @@ func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
 	}
 	res.SetName("public-http01")
 	if err := res.Init(&engine.Init{
-		Event: func(ctx context.Context) error { return nil },
+		Hostname: "solver-a",
+		Event:    func(context.Context) error { return nil },
 		Send: func(st interface{}) error {
 			payload, ok := st.(*AcmeHTTP01SolverSends)
 			if !ok {
@@ -149,28 +62,29 @@ func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
 			*sends = *payload
 			return nil
 		},
-		Local: api,
+		World: world,
 		Logf:  func(string, ...interface{}) {},
 	}); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
 	challenge := acmeHTTP01Challenge{
-		Attempt: "attempt-1",
-		Domain:  "example.com",
-		Token:   "token",
-		Path:    http01.ChallengePath("token"),
-		Body:    "key-authorization",
+		Attempt:      "attempt-1",
+		Domain:       "example.com",
+		Token:        "token",
+		Path:         "/.well-known/acme-challenge/token",
+		Body:         "key-authorization",
+		ChallengeURL: "https://ca.test/challenge/1",
 	}
-	if err := storeAcmeHTTP01ChallengeState(context.Background(), api, res.Name(), &acmeHTTP01ChallengeState{
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), world, res.Name(), &acmeHTTP01ChallengeState{
 		Challenges: map[string]acmeHTTP01Challenge{
 			challenge.key(): challenge,
 		},
 	}); err != nil {
 		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
 	}
-	if err := res.syncLocalState(context.Background()); err != nil {
-		t.Fatalf("syncLocalState failed: %v", err)
+	if err := res.syncWorldState(context.Background()); err != nil {
+		t.Fatalf("syncWorldState failed: %v", err)
 	}
 
 	checkOK, err := res.CheckApply(context.Background(), true)
@@ -190,6 +104,18 @@ func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
 		t.Fatalf("expected one active challenge, got %d", sends.ChallengeCount)
 	}
 
+	states, err := loadAcmeHTTP01PresentationStates(context.Background(), world, res.Name())
+	if err != nil {
+		t.Fatalf("loadAcmeHTTP01PresentationStates failed: %v", err)
+	}
+	state, exists := states["solver-a"]
+	if !exists {
+		t.Fatalf("expected presentation state for solver-a")
+	}
+	if len(state.Entries) != 1 {
+		t.Fatalf("expected one presentation entry, got %d", len(state.Entries))
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "http://example.com"+challenge.Path, nil)
 	req.Host = "example.com"
 	if err := res.AcceptHTTP(req); err != nil {
@@ -207,7 +133,7 @@ func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
 }
 
 func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
-	api := testLocalAPI(t)
+	world := newFakeWorld("solver-a")
 	sends := &AcmeHTTP01SolverSends{}
 
 	res := &AcmeHTTP01SolverRes{
@@ -216,7 +142,8 @@ func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
 	}
 	res.SetName("public-http01")
 	if err := res.Init(&engine.Init{
-		Event: func(ctx context.Context) error { return nil },
+		Hostname: "solver-a",
+		Event:    func(context.Context) error { return nil },
 		Send: func(st interface{}) error {
 			payload, ok := st.(*AcmeHTTP01SolverSends)
 			if !ok {
@@ -225,28 +152,29 @@ func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
 			*sends = *payload
 			return nil
 		},
-		Local: api,
+		World: world,
 		Logf:  func(string, ...interface{}) {},
 	}); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
 	challenge := acmeHTTP01Challenge{
-		Attempt: "attempt-1",
-		Domain:  "example.com",
-		Token:   "token",
-		Path:    http01.ChallengePath("token"),
-		Body:    "key-authorization",
+		Attempt:      "attempt-1",
+		Domain:       "example.com",
+		Token:        "token",
+		Path:         "/.well-known/acme-challenge/token",
+		Body:         "key-authorization",
+		ChallengeURL: "https://ca.test/challenge/1",
 	}
-	if err := storeAcmeHTTP01ChallengeState(context.Background(), api, res.Name(), &acmeHTTP01ChallengeState{
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), world, res.Name(), &acmeHTTP01ChallengeState{
 		Challenges: map[string]acmeHTTP01Challenge{
 			challenge.key(): challenge,
 		},
 	}); err != nil {
 		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
 	}
-	if err := res.syncLocalState(context.Background()); err != nil {
-		t.Fatalf("syncLocalState failed: %v", err)
+	if err := res.syncWorldState(context.Background()); err != nil {
+		t.Fatalf("syncWorldState failed: %v", err)
 	}
 
 	if _, err := res.CheckApply(context.Background(), true); err != nil {
@@ -267,7 +195,7 @@ func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
 }
 
 func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
-	api := testLocalAPI(t)
+	world := newFakeWorld("solver-a")
 
 	res := &AcmeHTTP01SolverRes{
 		Server: "public-80",
@@ -275,10 +203,11 @@ func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
 	}
 	res.SetName("public-http01")
 	if err := res.Init(&engine.Init{
-		Event: func(ctx context.Context) error { return nil },
-		Send:  func(interface{}) error { return nil },
-		Local: api,
-		Logf:  func(string, ...interface{}) {},
+		Hostname: "solver-a",
+		Event:    func(context.Context) error { return nil },
+		Send:     func(interface{}) error { return nil },
+		World:    world,
+		Logf:     func(string, ...interface{}) {},
 	}); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -297,29 +226,31 @@ func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
 	}()
 
 	challenge1 := acmeHTTP01Challenge{
-		Attempt: "attempt-1",
-		Domain:  "example.com",
-		Token:   "token-1",
-		Path:    http01.ChallengePath("token-1"),
-		Body:    "key-authorization-1",
+		Attempt:      "attempt-1",
+		Domain:       "example.com",
+		Token:        "token-1",
+		Path:         "/.well-known/acme-challenge/token-1",
+		Body:         "key-authorization-1",
+		ChallengeURL: "https://ca.test/challenge/1",
 	}
-	if err := storeAcmeHTTP01ChallengeState(context.Background(), api, res.Name(), &acmeHTTP01ChallengeState{
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), world, res.Name(), &acmeHTTP01ChallengeState{
 		Challenges: map[string]acmeHTTP01Challenge{
 			challenge1.key(): challenge1,
 		},
 	}); err != nil {
 		t.Fatalf("storing first challenge state failed: %v", err)
 	}
-	waitForHTTP01PresentationEntries(t, api, res.Name(), 1)
+	waitForHTTP01PresentationEntries(t, world, res.Name(), "solver-a", 1)
 
 	challenge2 := acmeHTTP01Challenge{
-		Attempt: "attempt-1",
-		Domain:  "www.example.com",
-		Token:   "token-2",
-		Path:    http01.ChallengePath("token-2"),
-		Body:    "key-authorization-2",
+		Attempt:      "attempt-1",
+		Domain:       "www.example.com",
+		Token:        "token-2",
+		Path:         "/.well-known/acme-challenge/token-2",
+		Body:         "key-authorization-2",
+		ChallengeURL: "https://ca.test/challenge/2",
 	}
-	if err := storeAcmeHTTP01ChallengeState(context.Background(), api, res.Name(), &acmeHTTP01ChallengeState{
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), world, res.Name(), &acmeHTTP01ChallengeState{
 		Challenges: map[string]acmeHTTP01Challenge{
 			challenge1.key(): challenge1,
 			challenge2.key(): challenge2,
@@ -327,7 +258,7 @@ func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storing second challenge state failed: %v", err)
 	}
-	waitForHTTP01PresentationEntries(t, api, res.Name(), 2)
+	waitForHTTP01PresentationEntries(t, world, res.Name(), "solver-a", 2)
 
 	cancel()
 	select {
@@ -340,24 +271,24 @@ func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
 	}
 }
 
-func waitForHTTP01PresentationEntries(t *testing.T, api *local.API, solver string, count int) {
+func waitForHTTP01PresentationEntries(t *testing.T, world *fakeWorld, solver, hostname string, count int) {
 	t.Helper()
 
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		state, err := loadAcmeHTTP01PresentationState(context.Background(), api, solver)
+		states, err := loadAcmeHTTP01PresentationStates(context.Background(), world, solver)
 		if err != nil {
-			t.Fatalf("loadAcmeHTTP01PresentationState failed: %v", err)
+			t.Fatalf("loadAcmeHTTP01PresentationStates failed: %v", err)
 		}
-		if len(state.Entries) == count {
+		if len(states[hostname].Entries) == count {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	state, err := loadAcmeHTTP01PresentationState(context.Background(), api, solver)
+	states, err := loadAcmeHTTP01PresentationStates(context.Background(), world, solver)
 	if err != nil {
-		t.Fatalf("loadAcmeHTTP01PresentationState failed: %v", err)
+		t.Fatalf("loadAcmeHTTP01PresentationStates failed: %v", err)
 	}
-	t.Fatalf("timed out waiting for %d presentation entries, got %d", count, len(state.Entries))
+	t.Fatalf("timed out waiting for %d presentation entries, got %d", count, len(states[hostname].Entries))
 }
