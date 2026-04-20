@@ -132,6 +132,20 @@ func (obj *fakeAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*ce
 	return obj.completeResult, nil
 }
 
+func mustTestAcmeAccountPayload(t *testing.T, directoryURL string) string {
+	t.Helper()
+
+	payload, err := encodeAcmeAccountData(&acmeAccountData{
+		DirectoryURL:    directoryURL,
+		PrivateKeyPEM:   "ACCOUNT\n",
+		RegistrationURI: "https://example.test/acct/1",
+	})
+	if err != nil {
+		t.Fatalf("encodeAcmeAccountData failed: %v", err)
+	}
+	return payload
+}
+
 func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
@@ -150,17 +164,18 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		AcceptTOS: true,
-		Email:     "ops@example.com",
-		Domains:   []string{"example.com", "www.example.com"},
-		Challenge: acmeChallengeDNS01,
+		Account:      "public-ca",
+		AccountReady: true,
+		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
+		Domains:      []string{"example.com", "www.example.com"},
+		Challenge:    acmeChallengeDNS01,
 	}
 	init, sent := fakeAcmeInit(t, false, nil)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 	res.nowFn = func() time.Time { return now }
-	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
 		return client, nil
 	}
 
@@ -218,8 +233,9 @@ func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		AcceptTOS:       true,
-		Email:           "ops@example.com",
+		Account:         "public-ca",
+		AccountReady:    true,
+		AccountData:     mustTestAcmeAccountPayload(t, "https://example.test/directory"),
 		Domains:         []string{"example.com"},
 		Challenge:       acmeChallengeDNS01,
 		RenewBeforeDays: 30,
@@ -229,18 +245,15 @@ func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
 		t.Fatalf("init failed: %v", err)
 	}
 	res.nowFn = func() time.Time { return now }
-	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
 		return client, nil
 	}
 
 	state := &acmeStoredState{
 		Version:              1,
-		Email:                "ops@example.com",
-		DirectoryURL:         res.DirectoryURL,
+		DirectoryURL:         "https://example.test/directory",
 		Domains:              []string{"example.com"},
 		KeyType:              "2048",
-		AccountPrivateKeyPEM: "ACCOUNT\n",
-		Registration:         &registration.Resource{URI: "https://example.test/acct/1"},
 		Domain:               "example.com",
 		CertURL:              "https://example.test/cert/1",
 		CertStableURL:        "https://example.test/cert/stable/1",
@@ -290,8 +303,7 @@ func TestBuildFullChainFromLeafAndIssuer(t *testing.T) {
 
 func TestAcmeValidateRequiresExplicitChallenge(t *testing.T) {
 	res := (&AcmeRes{}).Default().(*AcmeRes)
-	res.AcceptTOS = true
-	res.Email = "ops@example.com"
+	res.Account = "public-ca"
 	res.Domains = []string{"example.com"}
 
 	err := res.Validate()
@@ -302,8 +314,7 @@ func TestAcmeValidateRequiresExplicitChallenge(t *testing.T) {
 
 func TestAcmeValidateAcceptsDNSChallengeWithProviderEnv(t *testing.T) {
 	res := (&AcmeRes{}).Default().(*AcmeRes)
-	res.AcceptTOS = true
-	res.Email = "ops@example.com"
+	res.Account = "public-ca"
 	res.Domains = []string{"example.com"}
 	res.Challenge = acmeChallengeDNS01
 	res.DNSProvider = "cloudflare"
@@ -318,8 +329,7 @@ func TestAcmeValidateAcceptsDNSChallengeWithProviderEnv(t *testing.T) {
 
 func TestAcmeValidateRejectsMissingDNSProviderEnv(t *testing.T) {
 	res := (&AcmeRes{}).Default().(*AcmeRes)
-	res.AcceptTOS = true
-	res.Email = "ops@example.com"
+	res.Account = "public-ca"
 	res.Domains = []string{"example.com"}
 	res.Challenge = acmeChallengeDNS01
 	res.DNSProvider = "cloudflare"
@@ -332,14 +342,48 @@ func TestAcmeValidateRejectsMissingDNSProviderEnv(t *testing.T) {
 
 func TestAcmeValidateRejectsMissingHTTP01Solver(t *testing.T) {
 	res := (&AcmeRes{}).Default().(*AcmeRes)
-	res.AcceptTOS = true
-	res.Email = "ops@example.com"
+	res.Account = "public-ca"
 	res.Domains = []string{"example.com"}
 	res.Challenge = acmeChallengeHTTP01
 
 	err := res.Validate()
 	if err == nil || !strings.Contains(err.Error(), "Solver") {
 		t.Fatalf("expected solver validation error, got: %v", err)
+	}
+}
+
+func TestAcmeCheckApplyWaitsForAccountData(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
+	res := &AcmeRes{
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeDNS01,
+	}
+	init, sent := fakeAcmeInit(t, false, nil)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
+		t.Fatalf("clientFactory should not be called while account data is missing")
+		return nil, nil
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false while waiting for account data")
+	}
+
+	payload := sent()
+	if !payload.Pending {
+		t.Fatalf("expected pending to be true while waiting for account data")
+	}
+	if payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be false while waiting for account data")
 	}
 }
 
@@ -376,19 +420,20 @@ func TestAcmeCheckApplyPreparesHTTP01BeforeReady(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		AcceptTOS:   true,
-		Email:       "ops@example.com",
-		Domains:     []string{"example.com"},
-		Challenge:   acmeChallengeHTTP01,
-		Solver:      "public-http01",
-		HTTP01Ready: &http01Ready,
+		Account:      "public-ca",
+		AccountReady: true,
+		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
+		Domains:      []string{"example.com"},
+		Challenge:    acmeChallengeHTTP01,
+		Solver:       "public-http01",
+		HTTP01Ready:  &http01Ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 	res.nowFn = func() time.Time { return now }
-	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
 		return client, nil
 	}
 
@@ -475,31 +520,29 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		AcceptTOS:   true,
-		Email:       "ops@example.com",
-		Domains:     []string{"example.com"},
-		Challenge:   acmeChallengeHTTP01,
-		Solver:      "public-http01",
-		HTTP01Ready: &http01Ready,
+		Account:      "public-ca",
+		AccountReady: true,
+		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
+		Domains:      []string{"example.com"},
+		Challenge:    acmeChallengeHTTP01,
+		Solver:       "public-http01",
+		HTTP01Ready:  &http01Ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 	res.nowFn = func() time.Time { return now }
-	res.clientFactory = func(state *acmeStoredState) (acmeClient, error) {
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
 		return client, nil
 	}
 
 	if err := res.saveState(&acmeStoredState{
-		Version:              1,
-		Email:                "ops@example.com",
-		DirectoryURL:         res.DirectoryURL,
-		Domains:              []string{"example.com"},
-		KeyType:              "2048",
-		AccountPrivateKeyPEM: "ACCOUNT\n",
-		Registration:         &registration.Resource{URI: "https://example.test/acct/1"},
-		HTTP01:               orderState,
+		Version:      1,
+		DirectoryURL: "https://example.test/directory",
+		Domains:      []string{"example.com"},
+		KeyType:      "2048",
+		HTTP01:       orderState,
 	}); err != nil {
 		t.Fatalf("saveState failed: %v", err)
 	}
@@ -563,10 +606,11 @@ func TestAcmeCheckApplyDNS01PendingDoesNotSetHTTP01Pending(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 
 	res := &AcmeRes{
-		AcceptTOS: true,
-		Email:     "ops@example.com",
-		Domains:   []string{"example.com"},
-		Challenge: acmeChallengeDNS01,
+		Account:      "public-ca",
+		AccountReady: true,
+		AccountData:  mustTestAcmeAccountPayload(t, "https://example.test/directory"),
+		Domains:      []string{"example.com"},
+		Challenge:    acmeChallengeDNS01,
 	}
 	init, sent := fakeAcmeInit(t, false, nil)
 	if err := res.Init(init); err != nil {

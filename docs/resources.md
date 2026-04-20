@@ -47,8 +47,13 @@ files.
 
 ## Acme
 
-The `acme` and `acme:request` resources obtain and automatically renew
-certificates with ACME.
+The ACME resources are split into explicit account, request, and solver roles.
+
+* `acme:account`: manages the ACME account key and registration state.
+* `acme:request`: obtains and renews certificates using account data received
+  from `acme:account`.
+* `acme:solver:http01`: presents explicit HTTP-01 challenge material through an
+  `http:server`.
 
 Supported challenge values:
 
@@ -57,8 +62,12 @@ Supported challenge values:
 * `dns-01`: uses a lego-backed DNS provider selected by name with explicit
   `dns_provider` and `dns_env` inputs.
 
-The resulting PEM material is available over Send/Recv so that resources such
-as file can write the certificate, full chain, and private key to disk.
+The resulting PEM material from `acme:request` is available over Send/Recv so
+that resources such as file can write the certificate, full chain, and private
+key to disk.
+
+`acme:account` sends `ready` and `data`, and `acme:request` consumes those
+values through the `account_ready` and `account_data` inputs.
 
 For staged `http-01` orchestration, Send/Recv also exposes `pending` and
 `http01_pending`. The optional `http01_ready` input can hold the actual

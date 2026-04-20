@@ -62,7 +62,6 @@ import (
 )
 
 func init() {
-	engine.RegisterResource("acme", func() engine.Res { return &AcmeRes{} })
 	engine.RegisterResource("acme:request", func() engine.Res { return &AcmeRes{} })
 }
 
@@ -77,9 +76,8 @@ const (
 
 var acmeDNSProviderEnvMu sync.Mutex
 
-// AcmeRes manages an ACME account and certificate lifecycle using an explicit
-// ACME challenge type. The issued PEM material is exposed with send/recv so
-// that resources such as file can consume it directly.
+// AcmeRes manages an ACME certificate request using explicit ACME challenge
+// configuration and account data received from acme:account.
 type AcmeRes struct {
 	traits.Base
 	traits.Refreshable
@@ -88,11 +86,15 @@ type AcmeRes struct {
 
 	init *engine.Init
 
-	// Email is the ACME account contact email.
-	Email string `lang:"email" yaml:"email"`
+	// Account is the logical ACME account name this request expects.
+	Account string `lang:"account" yaml:"account"`
 
-	// AcceptTOS must be true so that the ACME account can be registered.
-	AcceptTOS bool `lang:"accept_tos" yaml:"accept_tos"`
+	// AccountReady indicates whether the referenced acme:account has valid
+	// account material ready for use.
+	AccountReady bool `lang:"account_ready" yaml:"account_ready"`
+
+	// AccountData is the encoded account payload sent by acme:account.
+	AccountData string `lang:"account_data" yaml:"account_data"`
 
 	// Domains is the ordered list of domains for the requested certificate.
 	// If omitted, the resource name is used as a single-domain certificate.
@@ -114,9 +116,6 @@ type AcmeRes struct {
 	// lego DNS provider factory. Keys and validation semantics are owned by the
 	// selected provider implementation.
 	DNSEnv map[string]string `lang:"dns_env" yaml:"dns_env"`
-
-	// DirectoryURL is the ACME directory endpoint.
-	DirectoryURL string `lang:"directory_url" yaml:"directory_url"`
 
 	// KeyType is the certificate private key type. Supported values are:
 	// rsa2048, rsa3072, rsa4096, rsa8192, ec256, ec384.
@@ -140,7 +139,7 @@ type AcmeRes struct {
 	statePath string
 
 	nowFn         func() time.Time
-	clientFactory func(*acmeStoredState) (acmeClient, error)
+	clientFactory func(*acmeStoredState, *acmeAccountData) (acmeClient, error)
 
 	scheduleMu sync.Mutex
 	scheduleAt *time.Time
@@ -150,7 +149,6 @@ type AcmeRes struct {
 // Default returns some sensible defaults for this resource.
 func (obj *AcmeRes) Default() engine.Res {
 	return &AcmeRes{
-		DirectoryURL:    lego.LEDirectoryProduction,
 		KeyType:         acmeDefaultKeyType,
 		RenewBeforeDays: acmeDefaultRenewBeforeDays,
 	}
@@ -158,17 +156,14 @@ func (obj *AcmeRes) Default() engine.Res {
 
 // Validate if the params passed in are valid data.
 func (obj *AcmeRes) Validate() error {
-	if !obj.AcceptTOS {
-		return fmt.Errorf("the AcceptTOS field must be true")
+	if strings.TrimSpace(obj.Account) == "" {
+		return fmt.Errorf("the Account field must not be empty")
 	}
 	switch obj.normalizedChallenge() {
 	case acmeChallengeHTTP01:
 	case acmeChallengeDNS01:
 	default:
 		return fmt.Errorf("the Challenge field must be one of %q or %q", acmeChallengeHTTP01, acmeChallengeDNS01)
-	}
-	if obj.DirectoryURL == "" {
-		return fmt.Errorf("the DirectoryURL field must not be empty")
 	}
 	if obj.normalizedChallenge() == acmeChallengeHTTP01 {
 		if obj.normalizedSolver() == "" {
@@ -309,6 +304,14 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 	}
 
 	if plan.needsApply {
+		if !obj.AccountReady {
+			obj.init.Logf("waiting for %s[%s] before reconciling the certificate request", "acme:account", obj.Account)
+			obj.updateSchedule(state, now)
+			if err := obj.init.Send(obj.buildSends(state, plan)); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 		if err := obj.init.Send(obj.buildSends(state, plan)); err != nil {
 			return false, err
 		}
@@ -344,11 +347,8 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 		return fmt.Errorf("not a %s", obj.Kind())
 	}
 
-	if obj.Email != res.Email {
-		return fmt.Errorf("the Email field differs")
-	}
-	if obj.AcceptTOS != res.AcceptTOS {
-		return fmt.Errorf("the AcceptTOS field differs")
+	if obj.Account != res.Account {
+		return fmt.Errorf("the Account field differs")
 	}
 	if !reflect.DeepEqual(obj.desiredDomains(), res.desiredDomains()) {
 		return fmt.Errorf("the Domains field differs")
@@ -364,9 +364,6 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 	}
 	if !reflect.DeepEqual(obj.normalizedDNSEnv(), res.normalizedDNSEnv()) {
 		return fmt.Errorf("the DNSEnv field differs")
-	}
-	if obj.DirectoryURL != res.DirectoryURL {
-		return fmt.Errorf("the DirectoryURL field differs")
 	}
 	if !strings.EqualFold(obj.KeyType, res.KeyType) {
 		return fmt.Errorf("the KeyType field differs")
@@ -444,33 +441,28 @@ func (obj *AcmeRes) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 type acmePlan struct {
 	needsApply     bool
-	updateAccount  bool
 	renew          bool
 	reissue        bool
 	http01Prepare  bool
 	http01Complete bool
 	reason         string
-	emailChanged   bool
 }
 
 type acmeStoredState struct {
-	Version              int                    `json:"version"`
-	Email                string                 `json:"email"`
-	DirectoryURL         string                 `json:"directory_url"`
-	Domains              []string               `json:"domains"`
-	KeyType              string                 `json:"key_type"`
-	MustStaple           bool                   `json:"must_staple"`
-	PreferredChain       string                 `json:"preferred_chain"`
-	AccountPrivateKeyPEM string                 `json:"account_private_key_pem"`
-	Registration         *registration.Resource `json:"registration,omitempty"`
-	Domain               string                 `json:"domain"`
-	CertURL              string                 `json:"cert_url"`
-	CertStableURL        string                 `json:"cert_stable_url"`
-	PrivateKeyPEM        string                 `json:"private_key_pem"`
-	CertificatePEM       string                 `json:"certificate_pem"`
-	IssuerCertificatePEM string                 `json:"issuer_certificate_pem"`
-	CSRPEM               string                 `json:"csr_pem"`
-	HTTP01               *acmeHTTP01OrderState  `json:"http01,omitempty"`
+	Version              int                   `json:"version"`
+	DirectoryURL         string                `json:"directory_url"`
+	Domains              []string              `json:"domains"`
+	KeyType              string                `json:"key_type"`
+	MustStaple           bool                  `json:"must_staple"`
+	PreferredChain       string                `json:"preferred_chain"`
+	Domain               string                `json:"domain"`
+	CertURL              string                `json:"cert_url"`
+	CertStableURL        string                `json:"cert_stable_url"`
+	PrivateKeyPEM        string                `json:"private_key_pem"`
+	CertificatePEM       string                `json:"certificate_pem"`
+	IssuerCertificatePEM string                `json:"issuer_certificate_pem"`
+	CSRPEM               string                `json:"csr_pem"`
+	HTTP01               *acmeHTTP01OrderState `json:"http01,omitempty"`
 }
 
 type acmeHTTP01IssueRequest struct {
@@ -841,6 +833,16 @@ func (obj *legoAcmeUser) GetPrivateKey() crypto.PrivateKey {
 	return obj.privateKey
 }
 
+func (obj *AcmeRes) accountData() (*acmeAccountData, error) {
+	if !obj.AccountReady {
+		return nil, nil
+	}
+	if strings.TrimSpace(obj.AccountData) == "" {
+		return nil, fmt.Errorf("account data is empty while account_ready is true")
+	}
+	return decodeAcmeAccountData(obj.AccountData)
+}
+
 func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Time) (*acmePlan, error) {
 	plan := &acmePlan{}
 	state = state.clone()
@@ -850,12 +852,13 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-
-	plan.emailChanged = state.Email != obj.Email
-	plan.updateAccount = state.Registration == nil || plan.emailChanged
+	accountData, err := obj.accountData()
+	if err != nil {
+		return nil, errwrap.Wrapf(err, "could not decode account data")
+	}
 
 	if obj.normalizedChallenge() == acmeChallengeHTTP01 && state.HTTP01 != nil {
-		if state.DirectoryURL != "" && state.DirectoryURL != obj.DirectoryURL {
+		if accountData != nil && state.DirectoryURL != "" && state.DirectoryURL != accountData.DirectoryURL {
 			plan.needsApply = true
 			plan.http01Prepare = true
 			plan.reason = "directory URL changed"
@@ -884,7 +887,7 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 		return plan, nil
 	}
 
-	if state.DirectoryURL != "" && state.DirectoryURL != obj.DirectoryURL {
+	if accountData != nil && state.DirectoryURL != "" && state.DirectoryURL != accountData.DirectoryURL {
 		plan.needsApply = true
 		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
 			plan.http01Prepare = true
@@ -967,34 +970,27 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 		plan.reason = "certificate is within the renewal window"
 		return plan, nil
 	}
-	if plan.updateAccount {
-		plan.needsApply = true
-		plan.reason = "account registration needs to be updated"
-	}
 
 	return plan, nil
 }
 
 func (obj *AcmeRes) reconcileState(state *acmeStoredState, plan *acmePlan) (*acmeStoredState, error) {
 	next := state.clone()
+	accountData, err := obj.accountData()
+	if err != nil {
+		return nil, errwrap.Wrapf(err, "could not decode account data")
+	}
+	if accountData == nil {
+		return obj.finalizeStateMetadata(next, nil)
+	}
 
-	client, err := obj.clientFactory(next)
+	client, err := obj.clientFactory(next, accountData)
 	if err != nil {
 		return nil, errwrap.Wrapf(err, "could not create ACME client")
 	}
 
-	next.AccountPrivateKeyPEM = normalizePEMString(client.AccountKeyPEM())
-
-	if plan.updateAccount || next.Registration == nil {
-		reg, err := client.EnsureRegistration(plan.emailChanged, obj.AcceptTOS)
-		if err != nil {
-			return nil, errwrap.Wrapf(err, "could not register ACME account")
-		}
-		next.Registration = reg
-	}
-
 	if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-		return obj.reconcileHTTP01State(next, client, plan)
+		return obj.reconcileHTTP01State(next, accountData, client, plan)
 	}
 
 	switch {
@@ -1024,10 +1020,10 @@ func (obj *AcmeRes) reconcileState(state *acmeStoredState, plan *acmePlan) (*acm
 		next.setCertificateResource(res)
 	}
 
-	return obj.finalizeStateMetadata(next)
+	return obj.finalizeStateMetadata(next, accountData)
 }
 
-func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, client acmeClient, plan *acmePlan) (*acmeStoredState, error) {
+func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acmeAccountData, client acmeClient, plan *acmePlan) (*acmeStoredState, error) {
 	if plan.http01Prepare {
 		orderState, err := client.BeginHTTP01(acmeHTTP01IssueRequest{
 			Domains:        obj.desiredDomains(),
@@ -1051,11 +1047,11 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, client acmeClien
 			return next, errwrap.Wrapf(err, "could not publish http-01 challenge state")
 		}
 
-		return obj.finalizeStateMetadata(next)
+		return obj.finalizeStateMetadata(next, accountData)
 	}
 
 	if !plan.http01Complete || next.HTTP01 == nil {
-		return obj.finalizeStateMetadata(next)
+		return obj.finalizeStateMetadata(next, accountData)
 	}
 
 	if err := obj.publishHTTP01Challenges(context.Background(), next.HTTP01); err != nil {
@@ -1064,26 +1060,26 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, client acmeClien
 
 	if !obj.http01Ready() {
 		obj.init.Logf("waiting for http01_ready before validating ACME HTTP-01 challenge")
-		return obj.finalizeStateMetadata(next)
+		return obj.finalizeStateMetadata(next, accountData)
 	}
 
 	ready, err := obj.http01PresentationReady(context.Background(), next.HTTP01)
 	if err != nil {
 		next.HTTP01 = nil
 		_ = obj.clearHTTP01Challenges(context.Background())
-		_, _ = obj.finalizeStateMetadata(next)
+		_, _ = obj.finalizeStateMetadata(next, accountData)
 		return next, errwrap.Wrapf(err, "http-01 solver presentation failed")
 	}
 	if !ready {
 		obj.init.Logf("waiting for %s[%s] to present the HTTP-01 challenge", acmeHTTP01SolverKind, obj.normalizedSolver())
-		return obj.finalizeStateMetadata(next)
+		return obj.finalizeStateMetadata(next, accountData)
 	}
 
 	res, err := client.CompleteHTTP01(next.HTTP01)
 	if err != nil {
 		next.HTTP01 = nil
 		_ = obj.clearHTTP01Challenges(context.Background())
-		_, _ = obj.finalizeStateMetadata(next)
+		_, _ = obj.finalizeStateMetadata(next, accountData)
 		return next, errwrap.Wrapf(err, "could not complete http-01 order")
 	}
 
@@ -1093,13 +1089,14 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, client acmeClien
 		return next, errwrap.Wrapf(err, "could not clear http-01 challenge state")
 	}
 
-	return obj.finalizeStateMetadata(next)
+	return obj.finalizeStateMetadata(next, accountData)
 }
 
-func (obj *AcmeRes) finalizeStateMetadata(next *acmeStoredState) (*acmeStoredState, error) {
+func (obj *AcmeRes) finalizeStateMetadata(next *acmeStoredState, accountData *acmeAccountData) (*acmeStoredState, error) {
 	next.Version = 1
-	next.Email = obj.Email
-	next.DirectoryURL = obj.DirectoryURL
+	if accountData != nil {
+		next.DirectoryURL = accountData.DirectoryURL
+	}
 	next.Domains = obj.desiredDomains()
 	keyType, err := obj.certificateKeyType()
 	if err != nil {
@@ -1165,59 +1162,34 @@ func (obj *AcmeRes) http01PresentationReady(ctx context.Context, orderState *acm
 	return false, nil
 }
 
-func (obj *AcmeRes) newLegoClient(state *acmeStoredState) (acmeClient, error) {
-	keyPEM := normalizePEMString(state.AccountPrivateKeyPEM)
-	if keyPEM == "" {
-		privateKey, err := certcrypto.GeneratePrivateKey(certcrypto.EC256)
-		if err != nil {
-			return nil, errwrap.Wrapf(err, "could not generate ACME account private key")
-		}
-		keyPEM = normalizePEMString(string(certcrypto.PEMEncode(privateKey)))
+func (obj *AcmeRes) newLegoClient(_ *acmeStoredState, accountData *acmeAccountData) (acmeClient, error) {
+	if accountData == nil {
+		return nil, fmt.Errorf("account data is missing")
 	}
 
-	privateKey, err := certcrypto.ParsePEMPrivateKey([]byte(keyPEM))
+	baseClient, err := newLegoBaseClient(accountData.DirectoryURL, "", accountData.PrivateKeyPEM, accountData.RegistrationURI)
 	if err != nil {
-		return nil, errwrap.Wrapf(err, "could not parse ACME account private key")
+		return nil, err
 	}
 
-	var reg *registration.Resource
-	if state.DirectoryURL == "" || state.DirectoryURL == obj.DirectoryURL {
-		reg = state.Registration
-	}
-
-	user := &legoAcmeUser{
-		email:        obj.Email,
-		registration: reg,
-		privateKey:   privateKey,
-	}
-
-	config := lego.NewConfig(user)
-	config.CADirURL = obj.DirectoryURL
 	keyType, err := obj.certificateKeyType()
 	if err != nil {
 		return nil, err
 	}
+	baseClient.keyType = keyType
+
+	config := lego.NewConfig(baseClient.user)
+	config.CADirURL = accountData.DirectoryURL
 	config.Certificate.KeyType = keyType
 
-	kid := ""
-	if reg != nil {
-		kid = reg.URI
-	}
-
-	core, err := api.New(config.HTTPClient, config.UserAgent, config.CADirURL, kid, privateKey)
-	if err != nil {
-		return nil, err
-	}
-
-	challengeManager := resolver.NewSolversManager(core)
+	challengeManager := resolver.NewSolversManager(baseClient.core)
 	prober := resolver.NewProber(challengeManager)
-	certifier := certificate.NewCertifier(core, prober, certificate.CertifierOptions{
+	baseClient.certifier = certificate.NewCertifier(baseClient.core, prober, certificate.CertifierOptions{
 		KeyType:             config.Certificate.KeyType,
 		Timeout:             config.Certificate.Timeout,
 		OverallRequestLimit: config.Certificate.OverallRequestLimit,
 		DisableCommonName:   config.Certificate.DisableCommonName,
 	})
-	registrar := registration.NewRegistrar(core, user)
 
 	switch obj.normalizedChallenge() {
 	case acmeChallengeHTTP01:
@@ -1237,14 +1209,7 @@ func (obj *AcmeRes) newLegoClient(state *acmeStoredState) (acmeClient, error) {
 		return nil, fmt.Errorf("unsupported challenge: %s", obj.Challenge)
 	}
 
-	return &legoAcmeClient{
-		core:          core,
-		certifier:     certifier,
-		registration:  registrar,
-		accountKeyPEM: keyPEM,
-		user:          user,
-		keyType:       keyType,
-	}, nil
+	return baseClient, nil
 }
 
 func (obj *AcmeRes) desiredDomains() []string {
@@ -1445,7 +1410,6 @@ func (obj *AcmeRes) loadState() (*acmeStoredState, error) {
 		return nil, errwrap.Wrapf(err, "could not parse ACME state")
 	}
 
-	state.AccountPrivateKeyPEM = normalizePEMString(state.AccountPrivateKeyPEM)
 	state.PrivateKeyPEM = normalizePEMString(state.PrivateKeyPEM)
 	state.CertificatePEM = normalizePEMString(state.CertificatePEM)
 	state.IssuerCertificatePEM = normalizePEMString(state.IssuerCertificatePEM)

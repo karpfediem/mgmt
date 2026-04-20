@@ -9,14 +9,19 @@ http:server "public-80" {
   address => ":80",
 }
 
+acme:account "letsencrypt-staging" {
+  email => "acme@example.com",
+  accept_tos => true,
+  directory_url => "https://acme-staging-v02.api.letsencrypt.org/directory",
+}
+
 acme:solver:http01 "public-http01" {
   server => "public-80",
   hosts => ["example.com", "www.example.com"],
 }
 
 acme:request "example.com" {
-  accept_tos => true,
-  email => "ops@example.com",
+  account => "letsencrypt-staging",
   domains => ["example.com", "www.example.com"],
   challenge => "http-01",
   solver => "public-http01",
@@ -35,3 +40,5 @@ file "/etc/ssl/example.com/privkey.pem" {
 
 Acme:Request["example.com"].fullchain -> File["/etc/ssl/example.com/fullchain.pem"].content
 Acme:Request["example.com"].private_key -> File["/etc/ssl/example.com/privkey.pem"].content
+Acme:Account["letsencrypt-staging"].ready -> Acme:Request["example.com"].account_ready
+Acme:Account["letsencrypt-staging"].data -> Acme:Request["example.com"].account_data
