@@ -15,8 +15,15 @@
 
       perSystem = {pkgs, ...}: let
         mgmt = pkgs.callPackage ./package.nix {};
+        mgmt-minimal = pkgs.callPackage ./package.nix {
+          enableAugeas = false;
+          enableDocker = false;
+          enableVirt = false;
+          enableCgo = false;
+        };
       in {
         packages.default = mgmt;
+        packages.minimal = mgmt-minimal;
       };
 
       flake = {

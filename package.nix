@@ -8,8 +8,20 @@
 , nex
 , pkg-config
 , ragel
+, enableAugeas ? true
+, enableDocker ? true
+, enableVirt ? true
+, enableCgo ? (enableAugeas || enableVirt)
 ,
 }:
+let
+  disabledTags =
+    lib.optionals (!enableAugeas) [ "noaugeas" ]
+    ++ lib.optionals (!enableVirt) [ "novirt" ]
+    ++ lib.optionals (!enableDocker) [ "nodocker" ];
+in
+assert lib.assertMsg (enableCgo || !(enableAugeas || enableVirt))
+  "mgmt package cannot disable CGO while Augeas or libvirt support remains enabled";
 buildGoModule rec {
   pname = "mgmt";
   version = "1.0.1-master";
@@ -26,18 +38,26 @@ buildGoModule rec {
     preBuild = "";
   };
 
-  buildInputs = [
-    augeas
-    libvirt
-    libxml2
-  ];
+  buildInputs =
+    lib.optionals enableAugeas [
+      augeas
+      libxml2
+    ]
+    ++ lib.optionals enableVirt [
+      libvirt
+    ];
 
   nativeBuildInputs = [
     gotools
     nex
-    pkg-config
     ragel
+  ]
+  ++ lib.optionals enableCgo [
+    pkg-config
   ];
+
+  env.CGO_ENABLED = if enableCgo then 1 else 0;
+  tags = disabledTags;
 
   ldflags = [
     "-s"
