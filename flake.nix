@@ -30,12 +30,16 @@
         deploy-svc-reload-change-vm = pkgs.callPackage ./test/nixos/deploy-svc-reload-change.nix {
           mgmt = mgmt-minimal;
         };
+        deploy-svc-notify-change-vm = pkgs.callPackage ./test/nixos/deploy-svc-notify-change.nix {
+          mgmt = mgmt-minimal;
+        };
       in {
         packages.default = mgmt;
         packages.minimal = mgmt-minimal;
         checks.deploy-readfile-change-vm = deploy-readfile-change-vm;
         checks.deploy-svc-restart-change-vm = deploy-svc-restart-change-vm;
         checks.deploy-svc-reload-change-vm = deploy-svc-reload-change-vm;
+        checks.deploy-svc-notify-change-vm = deploy-svc-notify-change-vm;
       };
 
       flake = {
