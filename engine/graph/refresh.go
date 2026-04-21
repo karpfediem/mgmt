@@ -69,3 +69,16 @@ func (obj *Engine) SetDownstreamRefresh(vertex pgraph.Vertex, b bool) {
 		}
 	}
 }
+
+// DownstreamRefreshPending determines if this vertex still has a notify refresh
+// pending on any downstream edge. This means a downstream dependency still
+// needs to run a refresh as a consequence of an earlier upstream change.
+func (obj *Engine) DownstreamRefreshPending(vertex pgraph.Vertex) bool {
+	for _, e := range obj.graph.OutgoingGraphEdges(vertex) {
+		edge := e.(*engine.Edge) // panic if wrong
+		if edge.Notify && edge.Refresh() {
+			return true
+		}
+	}
+	return false
+}

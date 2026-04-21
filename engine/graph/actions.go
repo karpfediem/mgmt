@@ -140,32 +140,24 @@ func (obj *Engine) OKTimestamp(vertex pgraph.Vertex) bool {
 // BadTimestamps returns the list of vertices that are causing our timestamp to
 // be bad.
 func (obj *Engine) BadTimestamps(vertex pgraph.Vertex) []pgraph.Vertex {
-	obj.tlock.RLock()
-	state := obj.state[vertex]
-	obj.tlock.RUnlock()
-
 	vs := []pgraph.Vertex{}
-	state.mutex.RLock()   // concurrent read start
-	ts := state.timestamp // race
-	state.mutex.RUnlock() // concurrent read end
 	// these are all the vertices pointing TO vertex, eg: ??? -> vertex
 	for _, v := range obj.graph.IncomingGraphVertices(vertex) {
 		obj.tlock.RLock()
-		state := obj.state[v]
+		upstreamState := obj.state[v]
 		obj.tlock.RUnlock()
 
-		// If the vertex has a greater timestamp than any prerequisite,
-		// then we can't run right now. If they're equal (eg: initially
-		// with a value of 0) then we also can't run because we should
-		// let our pre-requisites go first.
-		state.mutex.RLock()   // concurrent read start
-		t := state.timestamp  // race
-		state.mutex.RUnlock() // concurrent read end
+		// A dependency only needs to block us if it still has work to do, or
+		// if it has not completed its initial successful run yet.
+		upstreamState.mutex.RLock()   // concurrent read start
+		t := upstreamState.timestamp  // race
+		upstreamState.mutex.RUnlock() // concurrent read end
+		refreshPending := obj.RefreshPending(v)
+		stateOK := upstreamState.isStateOK.Load()
 		if obj.Debug {
-			obj.Logf("OKTimestamp: %d >= %d (%s): !%t", ts, t, v.String(), ts >= t)
+			obj.Logf("OKTimestamp: %s ts=%d stateOK=%t refresh=%t", v.String(), t, stateOK, refreshPending)
 		}
-		if ts >= t {
-			//return false
+		if t == 0 || !stateOK || refreshPending {
 			vs = append(vs, v)
 		}
 	}
@@ -438,8 +430,9 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 			activity = false // no we didn't do work...
 		}
 		sendRecvActivity := sendRecvSelfDirty || len(sendRecvDependents) > 0
+		refreshWaiterActivity := !activity && obj.DownstreamRefreshPending(vertex)
 		bootstrapActivity := false
-		if !activity && !sendRecvActivity {
+		if !activity && !sendRecvActivity && !refreshWaiterActivity {
 			state.mutex.RLock()
 			bootstrapActivity = (state.timestamp == 0)
 			state.mutex.RUnlock()
@@ -450,7 +443,7 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 		}
 
 		// poke! (should (must?) be sync)
-		if activity || sendRecvActivity || bootstrapActivity {
+		if activity || sendRecvActivity || refreshWaiterActivity || bootstrapActivity {
 			wg := &sync.WaitGroup{}
 			// update this timestamp *before* we poke or the poked
 			// nodes might fail due to having a too old timestamp!
