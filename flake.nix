@@ -21,9 +21,13 @@
           enableVirt = false;
           enableCgo = false;
         };
+        deploy-readfile-change-vm = pkgs.callPackage ./test/nixos/deploy-readfile-change.nix {
+          mgmt = mgmt-minimal;
+        };
       in {
         packages.default = mgmt;
         packages.minimal = mgmt-minimal;
+        checks.deploy-readfile-change-vm = deploy-readfile-change-vm;
       };
 
       flake = {

@@ -34,6 +34,7 @@ package lib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -788,6 +789,8 @@ func (obj *Main) Run(ctx context.Context) error {
 
 	var gapiChan chan gapi.Next // stream events contain some instructions!
 	gapiChan = nil              // starts off blocked
+	var gapiCancel context.CancelFunc
+	gapiCancel = nil
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -795,6 +798,20 @@ func (obj *Main) Run(ctx context.Context) error {
 		defer Logf("loop: exited")
 		started := true // track engine started state
 		var mainDeploy *gapi.Deploy
+		stopGAPI := func() {
+			if gapiCancel != nil {
+				gapiCancel()
+				gapiCancel = nil
+			}
+			gapiChan = nil
+			if gapiImpl == nil {
+				return
+			}
+			if err := gapiImpl.Err(); err != nil && !errors.Is(err, context.Canceled) {
+				obj.Logf("gapi exited with error: %+v", errwrap.WithoutContext(err))
+			}
+			gapiImpl = nil
+		}
 		for {
 			Logf("waiting...")
 			// The GAPI should always kick off an event on Next() at
@@ -810,9 +827,7 @@ func (obj *Main) Run(ctx context.Context) error {
 					Logf("deploy: exited")
 					deployChan = nil // disable it
 
-					if gapiImpl != nil { // currently running...
-						gapiChan = nil
-					}
+					stopGAPI()
 
 					if started {
 						if err := obj.ge.Pause(false); err != nil {
@@ -842,9 +857,7 @@ func (obj *Main) Run(ctx context.Context) error {
 					continue
 				}
 
-				if gapiImpl != nil { // currently running...
-					gapiChan = nil
-				}
+				stopGAPI()
 				gapiImpl = gapiObj // copy it to active
 
 				data := &gapi.Data{
@@ -876,7 +889,9 @@ func (obj *Main) Run(ctx context.Context) error {
 					Logf("gapi: next...")
 				}
 				// this must generate at least one event for it to work
-				gapiChan = gapiImpl.Next(deployCtx) // stream of graph switch events!
+				var gapiCtx context.Context
+				gapiCtx, gapiCancel = context.WithCancel(deployCtx)
+				gapiChan = gapiImpl.Next(gapiCtx) // stream of graph switch events!
 				gapiInfoResult = gapiImpl.Info()
 				continue
 
@@ -885,10 +900,7 @@ func (obj *Main) Run(ctx context.Context) error {
 					if obj.Debug {
 						Logf("gapi exited")
 					}
-					gapiChan = nil // disable it
-					if err := gapiImpl.Err(); err != nil {
-						obj.Logf("gapi exited with error: %+v", errwrap.WithoutContext(err))
-					}
+					stopGAPI()
 					continue
 				}
 

@@ -6,7 +6,7 @@
 ROOT="$(realpath "$(dirname "$(realpath "${BASH_SOURCE}")")/..")"
 
 # absolute location to freshly build binary to be used for testing
-export MGMT="$ROOT/mgmt"
+export MGMT="${MGMT:-$ROOT/mgmt}"
 
 if [[ $(uname) == "Darwin" ]] ; then
 	export timeout="gtimeout"
