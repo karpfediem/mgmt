@@ -717,16 +717,12 @@ func (obj *legoAcmeClient) BeginHTTP01(request acmeHTTP01IssueRequest) (*acmeHTT
 			return nil, err
 		}
 
-		var selected *acme.Challenge
-		for _, challenge := range authz.Challenges {
-			if challenge.Type == acmeChallengeHTTP01 {
-				challenge := challenge
-				selected = &challenge
-				break
-			}
+		selected, alreadyValid, err := selectACMEChallenge(authz, acmeChallengeHTTP01)
+		if err != nil {
+			return nil, err
 		}
-		if selected == nil {
-			return nil, fmt.Errorf("authorization for %q did not offer an http-01 challenge", authz.Identifier.Value)
+		if alreadyValid {
+			continue
 		}
 
 		keyAuthorization, err := obj.core.GetKeyAuthorization(selected.Token)
@@ -778,16 +774,12 @@ func (obj *legoAcmeClient) BeginDNS01(request acmeDNS01IssueRequest) (*acmeDNS01
 			return nil, err
 		}
 
-		var selected *acme.Challenge
-		for _, challenge := range authz.Challenges {
-			if challenge.Type == acmeChallengeDNS01 {
-				challenge := challenge
-				selected = &challenge
-				break
-			}
+		selected, alreadyValid, err := selectACMEChallenge(authz, acmeChallengeDNS01)
+		if err != nil {
+			return nil, err
 		}
-		if selected == nil {
-			return nil, fmt.Errorf("authorization for %q did not offer a dns-01 challenge", authz.Identifier.Value)
+		if alreadyValid {
+			continue
 		}
 
 		keyAuthorization, err := obj.core.GetKeyAuthorization(selected.Token)
@@ -860,6 +852,22 @@ func (obj *legoAcmeClient) beginChallengeOrder(domains []string, mustStaple bool
 	privateKeyPEM := normalizePEMString(string(certcrypto.PEMEncode(privateKey)))
 	csrPEM := normalizePEMString(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})))
 	return order, privateKeyPEM, csrPEM, nil
+}
+
+func selectACMEChallenge(authz acme.Authorization, challengeType string) (*acme.Challenge, bool, error) {
+	if authz.Status == acme.StatusValid {
+		return nil, true, nil
+	}
+
+	for _, challenge := range authz.Challenges {
+		if challenge.Type != challengeType {
+			continue
+		}
+		challenge := challenge
+		return &challenge, false, nil
+	}
+
+	return nil, false, fmt.Errorf("authorization for %q did not offer a %s challenge", authz.Identifier.Value, challengeType)
 }
 
 func (obj *legoAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*certificate.Resource, error) {
@@ -1207,25 +1215,31 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acm
 		return obj.finalizeStateMetadata(next, accountData)
 	}
 
-	if err := obj.publishHTTP01Challenges(context.Background(), next.HTTP01); err != nil {
-		return next, errwrap.Wrapf(err, "could not publish http-01 challenge state")
-	}
+	if len(next.HTTP01.Challenges) > 0 {
+		if err := obj.publishHTTP01Challenges(context.Background(), next.HTTP01); err != nil {
+			return next, errwrap.Wrapf(err, "could not publish http-01 challenge state")
+		}
 
-	if !obj.ready() {
-		obj.init.Logf("waiting for ready before validating ACME HTTP-01 challenge")
-		return obj.finalizeStateMetadata(next, accountData)
-	}
+		if !obj.ready() {
+			obj.init.Logf("waiting for ready before validating ACME HTTP-01 challenge")
+			return obj.finalizeStateMetadata(next, accountData)
+		}
 
-	ready, err := obj.http01PresentationReady(context.Background(), next.HTTP01)
-	if err != nil {
-		next.HTTP01 = nil
-		_ = obj.clearHTTP01Challenges(context.Background())
-		_, _ = obj.finalizeStateMetadata(next, accountData)
-		return next, errwrap.Wrapf(err, "http-01 solver presentation failed")
-	}
-	if !ready {
-		obj.init.Logf("waiting for %s[%s] to present the HTTP-01 challenge", acmeHTTP01SolverKind, obj.normalizedSolver())
-		return obj.finalizeStateMetadata(next, accountData)
+		ready, err := obj.http01PresentationReady(context.Background(), next.HTTP01)
+		if err != nil {
+			next.HTTP01 = nil
+			_ = obj.clearHTTP01Challenges(context.Background())
+			_, _ = obj.finalizeStateMetadata(next, accountData)
+			return next, errwrap.Wrapf(err, "http-01 solver presentation failed")
+		}
+		if !ready {
+			obj.init.Logf("waiting for %s[%s] to present the HTTP-01 challenge", acmeHTTP01SolverKind, obj.normalizedSolver())
+			return obj.finalizeStateMetadata(next, accountData)
+		}
+	} else {
+		if err := obj.clearHTTP01Challenges(context.Background()); err != nil {
+			return next, errwrap.Wrapf(err, "could not clear http-01 challenge state")
+		}
 	}
 
 	res, err := client.CompleteHTTP01(next.HTTP01)
@@ -1277,25 +1291,31 @@ func (obj *AcmeRes) reconcileDNS01State(next *acmeStoredState, accountData *acme
 		return obj.finalizeStateMetadata(next, accountData)
 	}
 
-	if err := obj.publishDNS01Challenges(context.Background(), next.DNS01); err != nil {
-		return next, errwrap.Wrapf(err, "could not publish dns-01 challenge state")
-	}
+	if len(next.DNS01.Challenges) > 0 {
+		if err := obj.publishDNS01Challenges(context.Background(), next.DNS01); err != nil {
+			return next, errwrap.Wrapf(err, "could not publish dns-01 challenge state")
+		}
 
-	if !obj.ready() {
-		obj.init.Logf("waiting for ready before validating ACME DNS-01 challenge")
-		return obj.finalizeStateMetadata(next, accountData)
-	}
+		if !obj.ready() {
+			obj.init.Logf("waiting for ready before validating ACME DNS-01 challenge")
+			return obj.finalizeStateMetadata(next, accountData)
+		}
 
-	ready, err := obj.dns01PresentationReady(context.Background(), next.DNS01)
-	if err != nil {
-		next.DNS01 = nil
-		_ = obj.clearDNS01Challenges(context.Background())
-		_, _ = obj.finalizeStateMetadata(next, accountData)
-		return next, errwrap.Wrapf(err, "dns-01 solver presentation failed")
-	}
-	if !ready {
-		obj.init.Logf("waiting for %s[%s] to present the DNS-01 challenge", acmeDNS01SolverKind, obj.normalizedSolver())
-		return obj.finalizeStateMetadata(next, accountData)
+		ready, err := obj.dns01PresentationReady(context.Background(), next.DNS01)
+		if err != nil {
+			next.DNS01 = nil
+			_ = obj.clearDNS01Challenges(context.Background())
+			_, _ = obj.finalizeStateMetadata(next, accountData)
+			return next, errwrap.Wrapf(err, "dns-01 solver presentation failed")
+		}
+		if !ready {
+			obj.init.Logf("waiting for %s[%s] to present the DNS-01 challenge", acmeDNS01SolverKind, obj.normalizedSolver())
+			return obj.finalizeStateMetadata(next, accountData)
+		}
+	} else {
+		if err := obj.clearDNS01Challenges(context.Background()); err != nil {
+			return next, errwrap.Wrapf(err, "could not clear dns-01 challenge state")
+		}
 	}
 
 	res, err := client.CompleteDNS01(next.DNS01)

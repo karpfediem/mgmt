@@ -48,6 +48,7 @@ import (
 
 	"github.com/purpleidea/mgmt/engine"
 
+	"github.com/go-acme/lego/v4/acme"
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/registration"
 )
@@ -366,6 +367,93 @@ func TestAcmeCheckApplyCompletesDNS01WhenReadyAndPresented(t *testing.T) {
 	}
 }
 
+func TestAcmeCheckApplyCompletesDNS01WithoutPresentationWhenAuthorizationAlreadyValid(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	ready := false
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
+	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
+
+	orderState := &acmeDNS01OrderState{
+		Attempt:        "attempt-1",
+		Domains:        []string{"example.com"},
+		KeyType:        "2048",
+		MustStaple:     false,
+		PreferredChain: "",
+		OrderURL:       "https://example.test/order/1",
+		FinalizeURL:    "https://example.test/order/1/finalize",
+		PrivateKeyPEM:  "PRIVATE KEY\n",
+		CSRPEM:         "CSR\n",
+		Challenges:     map[string]acmeDNS01Challenge{},
+	}
+
+	client := &fakeAcmeClient{
+		accountKeyPEM: "ACCOUNT\n",
+		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
+		completeDNS01Result: &certificate.Resource{
+			Domain:            "example.com",
+			CertURL:           "https://example.test/cert/1",
+			CertStableURL:     "https://example.test/cert/stable/1",
+			PrivateKey:        []byte(key),
+			Certificate:       []byte(fullchain),
+			IssuerCertificate: []byte(issuer),
+		},
+	}
+
+	res := &AcmeRes{
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeDNS01,
+		Solver:    "public-dns01",
+		Ready:     &ready,
+	}
+	init, sent := fakeAcmeInit(t, false, world)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
+		return client, nil
+	}
+
+	if err := res.saveState(&acmeStoredState{
+		Version:      1,
+		DirectoryURL: "https://example.test/directory",
+		Domains:      []string{"example.com"},
+		KeyType:      "2048",
+		DNS01:        orderState,
+	}); err != nil {
+		t.Fatalf("saveState failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false after completing dns-01 in this cycle")
+	}
+	if client.completeDNS01Calls != 1 {
+		t.Fatalf("expected one CompleteDNS01 call, got %d", client.completeDNS01Calls)
+	}
+
+	payload := sent()
+	if payload.Pending {
+		t.Fatalf("expected pending to be false after successful issuance")
+	}
+	if payload.Certificate != normalizePEMString(leaf) {
+		t.Fatalf("unexpected certificate payload")
+	}
+
+	challenges, err := loadAcmeDNS01ChallengeState(context.Background(), world, res.Solver)
+	if err != nil {
+		t.Fatalf("loadAcmeDNS01ChallengeState failed: %v", err)
+	}
+	if len(challenges.Challenges) != 0 {
+		t.Fatalf("expected published challenges to stay empty")
+	}
+}
+
 func TestBuildFullChainFromLeafAndIssuer(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 	_, leaf, issuer, _ := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
@@ -669,6 +757,116 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	}
 	if len(challenges.Challenges) != 0 {
 		t.Fatalf("expected published challenges to be cleared")
+	}
+}
+
+func TestAcmeCheckApplyCompletesHTTP01WithoutPresentationWhenAuthorizationAlreadyValid(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	http01Ready := false
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
+	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
+
+	orderState := &acmeHTTP01OrderState{
+		Attempt:        "attempt-1",
+		Domains:        []string{"example.com"},
+		KeyType:        "2048",
+		MustStaple:     false,
+		PreferredChain: "",
+		OrderURL:       "https://example.test/order/1",
+		FinalizeURL:    "https://example.test/order/1/finalize",
+		PrivateKeyPEM:  "PRIVATE KEY\n",
+		CSRPEM:         "CSR\n",
+		Challenges:     map[string]acmeHTTP01Challenge{},
+	}
+	client := &fakeAcmeClient{
+		accountKeyPEM: "ACCOUNT\n",
+		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
+		completeHTTP01Result: &certificate.Resource{
+			Domain:            "example.com",
+			CertURL:           "https://example.test/cert/1",
+			CertStableURL:     "https://example.test/cert/stable/1",
+			PrivateKey:        []byte(key),
+			Certificate:       []byte(fullchain),
+			IssuerCertificate: []byte(issuer),
+		},
+	}
+
+	res := &AcmeRes{
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeHTTP01,
+		Solver:    "public-http01",
+		Ready:     &http01Ready,
+	}
+	init, sent := fakeAcmeInit(t, false, world)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
+		return client, nil
+	}
+
+	if err := res.saveState(&acmeStoredState{
+		Version:      1,
+		DirectoryURL: "https://example.test/directory",
+		Domains:      []string{"example.com"},
+		KeyType:      "2048",
+		HTTP01:       orderState,
+	}); err != nil {
+		t.Fatalf("saveState failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false after completing http-01 in this cycle")
+	}
+	if client.completeHTTP01Calls != 1 {
+		t.Fatalf("expected one CompleteHTTP01 call, got %d", client.completeHTTP01Calls)
+	}
+
+	payload := sent()
+	if payload.Pending {
+		t.Fatalf("expected pending to be false after successful issuance")
+	}
+	if payload.Certificate != normalizePEMString(leaf) {
+		t.Fatalf("unexpected certificate payload")
+	}
+
+	challenges, err := loadAcmeHTTP01ChallengeState(context.Background(), world, res.Solver)
+	if err != nil {
+		t.Fatalf("loadAcmeHTTP01ChallengeState failed: %v", err)
+	}
+	if len(challenges.Challenges) != 0 {
+		t.Fatalf("expected published challenges to stay empty")
+	}
+}
+
+func TestSelectACMEChallengeSkipsAlreadyValidAuthorization(t *testing.T) {
+	for _, challengeType := range []string{acmeChallengeHTTP01, acmeChallengeDNS01} {
+		selected, alreadyValid, err := selectACMEChallenge(acme.Authorization{
+			Status: acme.StatusValid,
+			Identifier: acme.Identifier{
+				Type:  "dns",
+				Value: "example.com",
+			},
+			Challenges: []acme.Challenge{
+				{Type: acmeChallengeHTTP01},
+			},
+		}, challengeType)
+		if err != nil {
+			t.Fatalf("unexpected error for %s authorization reuse: %v", challengeType, err)
+		}
+		if !alreadyValid {
+			t.Fatalf("expected alreadyValid to be true for %s authorization reuse", challengeType)
+		}
+		if selected != nil {
+			t.Fatalf("expected no challenge to be returned for %s authorization reuse", challengeType)
+		}
 	}
 }
 
