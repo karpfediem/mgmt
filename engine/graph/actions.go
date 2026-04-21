@@ -438,13 +438,19 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 			activity = false // no we didn't do work...
 		}
 		sendRecvActivity := sendRecvSelfDirty || len(sendRecvDependents) > 0
+		bootstrapActivity := false
+		if !activity && !sendRecvActivity {
+			state.mutex.RLock()
+			bootstrapActivity = (state.timestamp == 0)
+			state.mutex.RUnlock()
+		}
 
 		if activity { // add refresh flag to downstream edges...
 			obj.SetDownstreamRefresh(vertex, true)
 		}
 
 		// poke! (should (must?) be sync)
-		if activity || sendRecvActivity {
+		if activity || sendRecvActivity || bootstrapActivity {
 			wg := &sync.WaitGroup{}
 			// update this timestamp *before* we poke or the poked
 			// nodes might fail due to having a too old timestamp!
