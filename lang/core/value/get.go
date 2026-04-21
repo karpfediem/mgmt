@@ -33,10 +33,13 @@ import (
 	"context"
 	"fmt"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/purpleidea/mgmt/lang/funcs"
 	"github.com/purpleidea/mgmt/lang/interfaces"
 	"github.com/purpleidea/mgmt/lang/types"
 	"github.com/purpleidea/mgmt/util/errwrap"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 )
 
 const (
@@ -266,13 +269,18 @@ func (obj *GetFunc) Stream(ctx context.Context) error {
 			if !ok { // closed
 				return nil
 			}
+			traceCtx, span := traceUtil.Start(ctx, "lang.core.value.get.watch_event",
+				attribute.String("key", *obj.key),
+			)
 			//if err != nil {
 			//	return errwrap.Wrapf(err, "channel watch failed on `%s`", obj.key)
 			//}
 
-			if err := obj.init.Event(ctx); err != nil { // send event
+			if err := obj.init.Event(traceCtx); err != nil { // send event
+				span.End()
 				return err
 			}
+			span.End()
 
 		case <-ctx.Done():
 			return nil

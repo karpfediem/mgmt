@@ -43,6 +43,9 @@ import (
 	"strings"
 	"sync"
 
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/purpleidea/mgmt/util"
 )
 
@@ -189,6 +192,12 @@ func (obj *Value) ValueSet(ctx context.Context, key string, value interface{}) e
 	if exists && reflect.DeepEqual(v, value) {
 		return nil // already in the correct state
 	}
+
+	_, span := traceUtil.Start(ctx, "engine.local.value_set",
+		attribute.String("key", key),
+		attribute.Bool("delete", value == nil),
+	)
+	defer span.End()
 
 	// Write to state dir on disk first. If ctx cancels, we assume it's not
 	// written or it doesn't matter because we're cancelling, meaning we're

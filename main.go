@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/purpleidea/mgmt/cli"
 	cliUtil "github.com/purpleidea/mgmt/cli/util"
@@ -45,6 +46,7 @@ import (
 	_ "github.com/purpleidea/mgmt/puppet"            // import so the gapi registers
 	_ "github.com/purpleidea/mgmt/puppet/langpuppet" // import so the gapi registers
 	"github.com/purpleidea/mgmt/util/pprof"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 	_ "github.com/purpleidea/mgmt/yamlgraph" // import so the gapi registers
 	"go.etcd.io/etcd/server/v3/etcdmain"
 )
@@ -103,6 +105,19 @@ func main() {
 	}
 	defer cancel()
 
+	shutdownTracing, err := traceUtil.Run(ctx, data.Program, data.Version, data.Flags.Logf)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			log.Printf("tracing shutdown: %v", err)
+		}
+	}()
+
 	name := ""
 	if len(data.Args) > 1 {
 		name = data.Args[1]
@@ -110,7 +125,7 @@ func main() {
 	// is there an alternate entry point for the cli?
 	if cli, err := entry.Lookup(name); err == nil && cli.Name() == name {
 		data.Args = data.Args[1:] // pop off "argv[0]"
-		if err := cli.CLI(context.Background(), data); err != nil {
+		if err := cli.CLI(ctx, data); err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 			//return // redundant
@@ -118,7 +133,7 @@ func main() {
 		return
 	}
 
-	if err := cli.CLI(context.Background(), data); err != nil {
+	if err := cli.CLI(ctx, data); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 		return

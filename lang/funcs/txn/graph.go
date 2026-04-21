@@ -30,10 +30,14 @@
 package txn
 
 import (
+	"context"
 	"sync"
+
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/purpleidea/mgmt/lang/interfaces"
 	"github.com/purpleidea/mgmt/pgraph"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 )
 
 var _ interfaces.GraphAPI = &Graph{} // ensure it meets this expectation
@@ -76,6 +80,12 @@ func (obj *Graph) AddVertex(f interfaces.Func) error {
 func (obj *Graph) AddEdge(f1, f2 interfaces.Func, fe *interfaces.FuncEdge) error {
 	obj.graphMutex.Lock()
 	defer obj.graphMutex.Unlock()
+	ctx, span := traceUtil.Start(context.Background(), "lang.txn.graph.add_edge",
+		attribute.String("from", f1.String()),
+		attribute.String("to", f2.String()),
+		attribute.Int("args", len(fe.Args)),
+	)
+	defer span.End()
 	if obj.Debug {
 		obj.Logf("AddEdge %p %s: %p %s -> %p %s", fe, fe, f1, f1, f2, f2)
 	}
@@ -83,18 +93,24 @@ func (obj *Graph) AddEdge(f1, f2 interfaces.Func, fe *interfaces.FuncEdge) error
 	// safety check to avoid cycles
 	g := obj.graph.Copy()
 	g.AddEdge(f1, f2, fe)
+	_, checkSpan := traceUtil.Start(ctx, "lang.txn.graph.add_edge.check_toposort")
 	if _, err := g.TopologicalSort(); err != nil {
+		checkSpan.End()
 		return err // not a dag
 	}
+	checkSpan.End()
 	// if we didn't cycle, we can modify the real graph safely...
 
 	obj.graph.AddEdge(f1, f2, fe) // replaces any existing edge here
 
 	// This shouldn't error, since the test graph didn't find a cycle.
+	_, realSpan := traceUtil.Start(ctx, "lang.txn.graph.add_edge.real_toposort")
 	if _, err := obj.graph.TopologicalSort(); err != nil {
+		realSpan.End()
 		// programming error
 		panic(err) // not a dag
 	}
+	realSpan.End()
 
 	return nil
 }

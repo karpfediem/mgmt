@@ -36,10 +36,13 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/purpleidea/mgmt/engine"
 	engineUtil "github.com/purpleidea/mgmt/engine/util"
 	"github.com/purpleidea/mgmt/pgraph"
 	"github.com/purpleidea/mgmt/util/errwrap"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 
 	"golang.org/x/time/rate"
 )
@@ -171,6 +174,12 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 		return fmt.Errorf("vertex is not a Res")
 	}
 
+	ctx, span := traceUtil.Start(ctx, "engine.graph.process",
+		attribute.String("resource.kind", res.Kind()),
+		attribute.String("resource.name", res.Name()),
+	)
+	defer span.End()
+
 	obj.tlock.RLock()
 	state := obj.state[vertex]
 	obj.tlock.RUnlock()
@@ -264,54 +273,63 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 	// Send/Recv *can* receive from someone that was grouped! The sender has
 	// to use *their* send/recv handle/implementation, which has to be setup
 	// properly by the parent resource during Init(). See: http:server:flag.
-	collectSendRecv := []engine.Res{} // found resources
-	for _, groupedRes := range collectGroupedResources(res) {
-		if _, ok := groupedRes.(engine.RecvableRes); !ok {
-			continue
-		}
-		collectSendRecv = append(collectSendRecv, groupedRes)
-	}
+	if err := func() error {
+		_, sendRecvSpan := traceUtil.Start(ctx, "engine.graph.process.sendrecv")
+		defer sendRecvSpan.End()
 
-	//for _, g := res.GetGroup() // non-recursive, one-layer method
-	for _, g := range collectSendRecv { // recursive method!
-		r, ok := g.(engine.RecvableRes)
-		if !ok {
-			continue
+		collectSendRecv := []engine.Res{} // found resources
+		for _, groupedRes := range collectGroupedResources(res) {
+			if _, ok := groupedRes.(engine.RecvableRes); !ok {
+				continue
+			}
+			collectSendRecv = append(collectSendRecv, groupedRes)
 		}
 
-		// This section looks almost identical to the above one!
-		if updated, err := SendRecv(r, nil); err != nil {
-			return errwrap.Wrapf(err, "could not grouped SendRecv")
-		} else if len(updated) > 0 {
-			//for _, s := range graph.UpdatedStrings(updated) {
-			//	obj.Logf("SendRecv: %s", s)
-			//}
-			for r, m := range updated { // map[engine.RecvableRes]map[string]*engine.Send
-				v, ok := r.(pgraph.Vertex)
-				if !ok {
-					continue
-				}
-				_, stateExists := obj.state[v] // autogrouped children probably don't have a state
-				if !stateExists {
-					continue
-				}
-				for s, send := range m {
-					if !send.Changed {
+		//for _, g := res.GetGroup() // non-recursive, one-layer method
+		for _, g := range collectSendRecv { // recursive method!
+			r, ok := g.(engine.RecvableRes)
+			if !ok {
+				continue
+			}
+
+			// This section looks almost identical to the above one!
+			if updated, err := SendRecv(r, nil); err != nil {
+				return errwrap.Wrapf(err, "could not grouped SendRecv")
+			} else if len(updated) > 0 {
+				//for _, s := range graph.UpdatedStrings(updated) {
+				//	obj.Logf("SendRecv: %s", s)
+				//}
+				for r, m := range updated { // map[engine.RecvableRes]map[string]*engine.Send
+					v, ok := r.(pgraph.Vertex)
+					if !ok {
 						continue
 					}
-					obj.Logf("Send/Recv: %v.%s -> %v.%s", send.Res, send.Key, r, s)
-					// if send.Changed == true, at least one was updated
-					// invalidate cache, mark as dirty
-					obj.state[v].setDirty()
-					//break // we might have more vertices now
-				}
+					_, stateExists := obj.state[v] // autogrouped children probably don't have a state
+					if !stateExists {
+						continue
+					}
+					for s, send := range m {
+						if !send.Changed {
+							continue
+						}
+						obj.Logf("Send/Recv: %v.%s -> %v.%s", send.Res, send.Key, r, s)
+						// if send.Changed == true, at least one was updated
+						// invalidate cache, mark as dirty
+						obj.state[v].setDirty()
+						//break // we might have more vertices now
+					}
 
-				// re-validate after we change any values
-				if err := engine.Validate(r); err != nil {
-					return errwrap.Wrapf(err, "failed grouped Validate after SendRecv")
+					// re-validate after we change any values
+					if err := engine.Validate(r); err != nil {
+						return errwrap.Wrapf(err, "failed grouped Validate after SendRecv")
+					}
 				}
 			}
 		}
+
+		return nil
+	}(); err != nil {
+		return err
 	}
 	// XXX: this might not work with two merged "CompatibleRes" resources...
 	// XXX: fix that so we can have the mappings to do it in lang/interpret.go ?

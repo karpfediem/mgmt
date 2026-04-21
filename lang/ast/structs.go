@@ -3551,6 +3551,7 @@ func (obj *StmtIf) Graph(env *interfaces.Env) (*pgraph.Graph, error) {
 		Then: obj.ThenBranch,
 		Else: obj.ElseBranch,
 	}
+	stmtIfFunc.SetTextarea(obj.Textarea)
 	graph.AddVertex(stmtIfFunc)
 	interfaces.AddMergedFuncEdge(graph, obj.conditionPtr, stmtIfFunc, edgeName)
 

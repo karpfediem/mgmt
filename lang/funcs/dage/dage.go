@@ -39,6 +39,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/purpleidea/mgmt/engine"
 	"github.com/purpleidea/mgmt/engine/local"
 	"github.com/purpleidea/mgmt/lang/funcs/ref"
@@ -48,6 +50,7 @@ import (
 	"github.com/purpleidea/mgmt/pgraph"
 	"github.com/purpleidea/mgmt/util"
 	"github.com/purpleidea/mgmt/util/errwrap"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 )
 
 // Engine implements a dag engine which lets us "run" a dag of functions, but
@@ -627,6 +630,11 @@ Start:
 // which stores the event information.
 func (obj *Engine) event(ctx context.Context, state *state) error {
 	//f := state.Func // for reference, how to get the Vertex/Func pointer!
+	_, span := traceUtil.Start(ctx, "lang.dage.event",
+		attribute.String("engine.name", obj.Name),
+		attribute.String("func.name", state.String()),
+	)
+	defer span.End()
 
 	select {
 	case obj.ag.In <- state: // buffered to avoid blocking issues
@@ -655,6 +663,13 @@ func (obj *Engine) effect( /*delta *DeltaOps*/ ) error {
 // call is a helper to handle the recovering if needed from a function call.
 // NOTE: We moved f to be the last arg because golint complains ctx isn't first.
 func (obj *Engine) call(ctx context.Context, args []types.Value, f interfaces.Func) (result types.Value, reterr error) {
+	ctx, span := traceUtil.Start(ctx, "lang.dage.call",
+		attribute.String("func.name", f.String()),
+		attribute.String("func.type", fmt.Sprintf("%T", f)),
+		attribute.Int("argc", len(args)),
+	)
+	defer span.End()
+
 	defer func() {
 		// catch programming errors
 		if r := recover(); r != nil {

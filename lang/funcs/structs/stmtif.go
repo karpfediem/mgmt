@@ -33,9 +33,12 @@ import (
 	"context"
 	"fmt"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/purpleidea/mgmt/lang/interfaces"
 	"github.com/purpleidea/mgmt/lang/types"
 	"github.com/purpleidea/mgmt/util/errwrap"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 )
 
 const (
@@ -104,7 +107,22 @@ func (obj *StmtIfFunc) Init(init *interfaces.Init) error {
 	return nil
 }
 
-func (obj *StmtIfFunc) replaceSubGraph(b bool) error {
+func (obj *StmtIfFunc) replaceSubGraph(ctx context.Context, b bool) error {
+	attrs := []attribute.KeyValue{
+		attribute.Bool("condition", b),
+		attribute.Bool("needs_reverse", obj.needsReverse),
+		attribute.Bool("has_then", obj.Then != nil),
+		attribute.Bool("has_else", obj.Else != nil),
+	}
+	if obj.IsSet() {
+		attrs = append(attrs,
+			attribute.String("mcl.byline", obj.Byline()),
+			attribute.String("mcl.filename", obj.Filename()),
+			attribute.String("mcl.path", obj.Path()),
+		)
+	}
+	_, span := traceUtil.Start(ctx, "lang.stmtif.replace_subgraph", attrs...)
+	defer span.End()
 	if obj.needsReverse { // not on the first run
 		// delete the old subgraph
 		if err := obj.init.Txn.Reverse(); err != nil {
@@ -142,7 +160,7 @@ func (obj *StmtIfFunc) Call(ctx context.Context, args []types.Value) (types.Valu
 	if obj.last == nil || *obj.last != b {
 		obj.last = &b // store new result
 
-		if err := obj.replaceSubGraph(b); err != nil {
+		if err := obj.replaceSubGraph(ctx, b); err != nil {
 			return nil, errwrap.Wrapf(err, "could not replace subgraph")
 		}
 

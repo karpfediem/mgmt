@@ -36,9 +36,12 @@ import (
 	"sort"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/purpleidea/mgmt/lang/funcs/ref"
 	"github.com/purpleidea/mgmt/lang/interfaces"
 	"github.com/purpleidea/mgmt/pgraph"
+	traceUtil "github.com/purpleidea/mgmt/util/tracing"
 )
 
 // PostReverseCommit specifies that if we run Reverse, and we had previous items
@@ -469,6 +472,12 @@ func (obj *GraphTxn) commit() error {
 	if len(obj.ops) == 0 { // nothing to do
 		return nil
 	}
+
+	_, span := traceUtil.Start(context.Background(), "lang.txn.commit",
+		attribute.Int("ops", len(obj.ops)),
+		attribute.Int("rev_ops", len(obj.rev)),
+	)
+	defer span.End()
 
 	// TODO: Instead of requesting the below locks, it's conceivable that we
 	// could either write an engine that doesn't require pausing the graph
