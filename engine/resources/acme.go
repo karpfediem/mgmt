@@ -52,11 +52,8 @@ import (
 	"github.com/go-acme/lego/v4/acme/api"
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/certificate"
-	legochallenge "github.com/go-acme/lego/v4/challenge"
-	"github.com/go-acme/lego/v4/challenge/resolver"
-	"github.com/go-acme/lego/v4/lego"
+	legodns01 "github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/platform/wait"
-	legodns "github.com/go-acme/lego/v4/providers/dns"
 	"github.com/go-acme/lego/v4/registration"
 	"golang.org/x/net/idna"
 )
@@ -73,8 +70,6 @@ const (
 	acmeChallengeHTTP01        = "http-01"
 	acmeChallengeDNS01         = "dns-01"
 )
-
-var acmeDNSProviderEnvMu sync.Mutex
 
 // AcmeRes manages an ACME certificate request using explicit ACME challenge
 // configuration and account state loaded from acme:account.
@@ -96,18 +91,9 @@ type AcmeRes struct {
 	// Supported values are: http-01, dns-01.
 	Challenge string `lang:"challenge" yaml:"challenge"`
 
-	// Solver selects an explicit ACME solver resource when the request uses
-	// http-01.
+	// Solver selects the explicit ACME solver resource that presents the chosen
+	// challenge type.
 	Solver string `lang:"solver" yaml:"solver"`
-
-	// DNSProvider selects the lego-backed DNS provider used when Challenge is
-	// dns-01.
-	DNSProvider string `lang:"dns_provider" yaml:"dns_provider"`
-
-	// DNSEnv contains the provider environment variables passed through to the
-	// lego DNS provider factory. Keys and validation semantics are owned by the
-	// selected provider implementation.
-	DNSEnv map[string]string `lang:"dns_env" yaml:"dns_env"`
 
 	// KeyType is the certificate private key type. Supported values are:
 	// rsa2048, rsa3072, rsa4096, rsa8192, ec256, ec384.
@@ -123,9 +109,9 @@ type AcmeRes struct {
 	// PreferredChain requests a particular issuer chain when the CA supports it.
 	PreferredChain string `lang:"preferred_chain" yaml:"preferred_chain"`
 
-	// HTTP01Ready optionally gates when an HTTP-01 challenge attempt may run.
-	// A nil value means no external gate is in use.
-	HTTP01Ready *bool `lang:"http01_ready" yaml:"http01_ready"`
+	// Ready optionally gates when a pending challenge attempt may be validated
+	// with the CA. A nil value means no external gate is in use.
+	Ready *bool `lang:"ready" yaml:"ready"`
 
 	varDir    string
 	statePath string
@@ -158,18 +144,8 @@ func (obj *AcmeRes) Validate() error {
 	default:
 		return fmt.Errorf("the Challenge field must be one of %q or %q", acmeChallengeHTTP01, acmeChallengeDNS01)
 	}
-	if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-		if obj.normalizedSolver() == "" {
-			return fmt.Errorf("the Solver field must not be empty when Challenge is %q", acmeChallengeHTTP01)
-		}
-	} else if obj.normalizedSolver() != "" {
-		return fmt.Errorf("the Solver field is only valid when Challenge is %q", acmeChallengeHTTP01)
-	}
-	if obj.normalizedChallenge() != acmeChallengeHTTP01 && obj.HTTP01Ready != nil {
-		return fmt.Errorf("the HTTP01Ready field is only valid when Challenge is %q", acmeChallengeHTTP01)
-	}
-	if err := obj.validateDNSChallengeConfig(); err != nil {
-		return err
+	if obj.normalizedSolver() == "" {
+		return fmt.Errorf("the Solver field must not be empty")
 	}
 	if _, err := obj.certificateKeyType(); err != nil {
 		return err
@@ -213,8 +189,11 @@ func (obj *AcmeRes) Init(init *engine.Init) error {
 
 // Cleanup is run by the engine to clean up after the resource is done.
 func (obj *AcmeRes) Cleanup() error {
-	if obj.normalizedChallenge() == acmeChallengeHTTP01 {
+	switch obj.normalizedChallenge() {
+	case acmeChallengeHTTP01:
 		_ = obj.clearHTTP01Challenges(context.Background())
+	case acmeChallengeDNS01:
+		_ = obj.clearDNS01Challenges(context.Background())
 	}
 	return nil
 }
@@ -229,8 +208,15 @@ func (obj *AcmeRes) Watch(ctx context.Context) error {
 	accountCh = ch
 
 	var presentationCh chan error
-	if obj.normalizedChallenge() == acmeChallengeHTTP01 && obj.normalizedSolver() != "" {
+	switch obj.normalizedChallenge() {
+	case acmeChallengeHTTP01:
 		ch, err := obj.init.World.StrMapWatch(ctx, acmeHTTP01PresentationStateKey(obj.normalizedSolver()))
+		if err != nil {
+			return err
+		}
+		presentationCh = ch
+	case acmeChallengeDNS01:
+		ch, err := obj.init.World.StrWatch(ctx, acmeDNS01PresentationStateKey(obj.normalizedSolver()))
 		if err != nil {
 			return err
 		}
@@ -382,12 +368,6 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 	if obj.normalizedSolver() != res.normalizedSolver() {
 		return fmt.Errorf("the Solver field differs")
 	}
-	if obj.normalizedDNSProvider() != res.normalizedDNSProvider() {
-		return fmt.Errorf("the DNSProvider field differs")
-	}
-	if !reflect.DeepEqual(obj.normalizedDNSEnv(), res.normalizedDNSEnv()) {
-		return fmt.Errorf("the DNSEnv field differs")
-	}
 	if !strings.EqualFold(obj.KeyType, res.KeyType) {
 		return fmt.Errorf("the KeyType field differs")
 	}
@@ -400,8 +380,8 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 	if obj.PreferredChain != res.PreferredChain {
 		return fmt.Errorf("the PreferredChain field differs")
 	}
-	if !reflect.DeepEqual(obj.HTTP01Ready, res.HTTP01Ready) {
-		return fmt.Errorf("the HTTP01Ready field differs")
+	if !reflect.DeepEqual(obj.Ready, res.Ready) {
+		return fmt.Errorf("the Ready field differs")
 	}
 
 	return nil
@@ -463,12 +443,10 @@ func (obj *AcmeRes) UnmarshalYAML(unmarshal func(interface{}) error) error {
 }
 
 type acmePlan struct {
-	needsApply     bool
-	renew          bool
-	reissue        bool
-	http01Prepare  bool
-	http01Complete bool
-	reason         string
+	needsApply bool
+	prepare    bool
+	complete   bool
+	reason     string
 }
 
 type acmeStoredState struct {
@@ -486,6 +464,7 @@ type acmeStoredState struct {
 	IssuerCertificatePEM string                `json:"issuer_certificate_pem"`
 	CSRPEM               string                `json:"csr_pem"`
 	HTTP01               *acmeHTTP01OrderState `json:"http01,omitempty"`
+	DNS01                *acmeDNS01OrderState  `json:"dns01,omitempty"`
 }
 
 type acmeHTTP01IssueRequest struct {
@@ -507,6 +486,25 @@ type acmeHTTP01OrderState struct {
 	Challenges     map[string]acmeHTTP01Challenge `json:"challenges"`
 }
 
+type acmeDNS01IssueRequest struct {
+	Domains        []string
+	MustStaple     bool
+	PreferredChain string
+}
+
+type acmeDNS01OrderState struct {
+	Attempt        string                        `json:"attempt"`
+	Domains        []string                      `json:"domains"`
+	KeyType        string                        `json:"key_type"`
+	MustStaple     bool                          `json:"must_staple"`
+	PreferredChain string                        `json:"preferred_chain"`
+	OrderURL       string                        `json:"order_url"`
+	FinalizeURL    string                        `json:"finalize_url"`
+	PrivateKeyPEM  string                        `json:"private_key_pem"`
+	CSRPEM         string                        `json:"csr_pem"`
+	Challenges     map[string]acmeDNS01Challenge `json:"challenges"`
+}
+
 func (obj *acmeHTTP01OrderState) clone() *acmeHTTP01OrderState {
 	if obj == nil {
 		return nil
@@ -516,6 +514,22 @@ func (obj *acmeHTTP01OrderState) clone() *acmeHTTP01OrderState {
 	clone.Domains = append([]string(nil), obj.Domains...)
 	if obj.Challenges != nil {
 		clone.Challenges = make(map[string]acmeHTTP01Challenge, len(obj.Challenges))
+		for key, challenge := range obj.Challenges {
+			clone.Challenges[key] = challenge
+		}
+	}
+	return &clone
+}
+
+func (obj *acmeDNS01OrderState) clone() *acmeDNS01OrderState {
+	if obj == nil {
+		return nil
+	}
+
+	clone := *obj
+	clone.Domains = append([]string(nil), obj.Domains...)
+	if obj.Challenges != nil {
+		clone.Challenges = make(map[string]acmeDNS01Challenge, len(obj.Challenges))
 		for key, challenge := range obj.Challenges {
 			clone.Challenges[key] = challenge
 		}
@@ -542,6 +556,25 @@ func (obj *acmeHTTP01OrderState) matches(domains []string, keyType string, mustS
 	return true
 }
 
+func (obj *acmeDNS01OrderState) matches(domains []string, keyType string, mustStaple bool, preferredChain string) bool {
+	if obj == nil {
+		return false
+	}
+	if !stringSliceEqual(obj.Domains, domains) {
+		return false
+	}
+	if !strings.EqualFold(obj.KeyType, keyType) {
+		return false
+	}
+	if obj.MustStaple != mustStaple {
+		return false
+	}
+	if obj.PreferredChain != preferredChain {
+		return false
+	}
+	return true
+}
+
 func (obj *acmeStoredState) clone() *acmeStoredState {
 	if obj == nil {
 		return &acmeStoredState{}
@@ -549,11 +582,16 @@ func (obj *acmeStoredState) clone() *acmeStoredState {
 	clone := *obj
 	clone.Domains = append([]string(nil), obj.Domains...)
 	clone.HTTP01 = obj.HTTP01.clone()
+	clone.DNS01 = obj.DNS01.clone()
 	return &clone
 }
 
 func (obj *acmeStoredState) hasCertificateMaterial() bool {
 	return strings.TrimSpace(obj.PrivateKeyPEM) != "" && strings.TrimSpace(obj.CertificatePEM) != ""
+}
+
+func (obj *acmeStoredState) hasPendingChallenge() bool {
+	return obj != nil && (obj.HTTP01 != nil || obj.DNS01 != nil)
 }
 
 func (obj *acmeStoredState) leafCert() (*x509.Certificate, error) {
@@ -592,15 +630,14 @@ func (obj *acmeStoredState) setCertificateResource(res *certificate.Resource) {
 type acmeClient interface {
 	AccountKeyPEM() string
 	EnsureRegistration(emailChanged, acceptTOS bool) (*registration.Resource, error)
-	Obtain(certificate.ObtainRequest) (*certificate.Resource, error)
-	Renew(certificate.Resource, *certificate.RenewOptions) (*certificate.Resource, error)
 	BeginHTTP01(acmeHTTP01IssueRequest) (*acmeHTTP01OrderState, error)
 	CompleteHTTP01(*acmeHTTP01OrderState) (*certificate.Resource, error)
+	BeginDNS01(acmeDNS01IssueRequest) (*acmeDNS01OrderState, error)
+	CompleteDNS01(*acmeDNS01OrderState) (*certificate.Resource, error)
 }
 
 type legoAcmeClient struct {
 	core          *api.Core
-	certifier     *certificate.Certifier
 	registration  *registration.Registrar
 	accountKeyPEM string
 	user          *legoAcmeUser
@@ -630,14 +667,6 @@ func (obj *legoAcmeClient) EnsureRegistration(emailChanged, acceptTOS bool) (*re
 		return reg, nil
 	}
 	return obj.user.GetRegistration(), nil
-}
-
-func (obj *legoAcmeClient) Obtain(request certificate.ObtainRequest) (*certificate.Resource, error) {
-	return obj.certifier.Obtain(request)
-}
-
-func (obj *legoAcmeClient) Renew(certRes certificate.Resource, opts *certificate.RenewOptions) (*certificate.Resource, error) {
-	return obj.certifier.RenewWithOptions(certRes, opts)
 }
 
 func (obj *legoAcmeClient) BeginHTTP01(request acmeHTTP01IssueRequest) (*acmeHTTP01OrderState, error) {
@@ -730,6 +759,109 @@ func (obj *legoAcmeClient) BeginHTTP01(request acmeHTTP01IssueRequest) (*acmeHTT
 	}, nil
 }
 
+func (obj *legoAcmeClient) BeginDNS01(request acmeDNS01IssueRequest) (*acmeDNS01OrderState, error) {
+	domains := sanitizeACMEDomains(request.Domains)
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("no domains to obtain a certificate for")
+	}
+
+	order, privateKeyPEM, csrPEM, err := obj.beginChallengeOrder(domains, request.MustStaple)
+	if err != nil {
+		return nil, err
+	}
+
+	challenges := make(map[string]acmeDNS01Challenge, len(order.Authorizations))
+	attempt := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	for _, authzURL := range order.Authorizations {
+		authz, err := obj.core.Authorizations.Get(authzURL)
+		if err != nil {
+			return nil, err
+		}
+
+		var selected *acme.Challenge
+		for _, challenge := range authz.Challenges {
+			if challenge.Type == acmeChallengeDNS01 {
+				challenge := challenge
+				selected = &challenge
+				break
+			}
+		}
+		if selected == nil {
+			return nil, fmt.Errorf("authorization for %q did not offer a dns-01 challenge", authz.Identifier.Value)
+		}
+
+		keyAuthorization, err := obj.core.GetKeyAuthorization(selected.Token)
+		if err != nil {
+			return nil, err
+		}
+
+		info := legodns01.GetChallengeInfo(authz.Identifier.Value, keyAuthorization)
+		challenge := acmeDNS01Challenge{
+			Attempt:          attempt,
+			Domain:           authz.Identifier.Value,
+			Token:            selected.Token,
+			KeyAuthorization: keyAuthorization,
+			FQDN:             info.EffectiveFQDN,
+			Value:            info.Value,
+			ChallengeURL:     selected.URL,
+		}
+		challenges[challenge.key()] = challenge
+	}
+
+	return &acmeDNS01OrderState{
+		Attempt:        attempt,
+		Domains:        append([]string(nil), domains...),
+		KeyType:        string(obj.keyType),
+		MustStaple:     request.MustStaple,
+		PreferredChain: request.PreferredChain,
+		OrderURL:       order.Location,
+		FinalizeURL:    order.Finalize,
+		PrivateKeyPEM:  privateKeyPEM,
+		CSRPEM:         csrPEM,
+		Challenges:     challenges,
+	}, nil
+}
+
+func (obj *legoAcmeClient) beginChallengeOrder(domains []string, mustStaple bool) (acme.ExtendedOrder, string, string, error) {
+	order, err := obj.core.Orders.New(domains)
+	if err != nil {
+		return acme.ExtendedOrder{}, "", "", err
+	}
+
+	privateKey, err := certcrypto.GeneratePrivateKey(obj.keyType)
+	if err != nil {
+		return acme.ExtendedOrder{}, "", "", err
+	}
+
+	commonName := ""
+	if len(domains[0]) <= 64 {
+		commonName = domains[0]
+	}
+
+	san := []string{}
+	if commonName != "" {
+		san = append(san, commonName)
+	}
+	for _, domain := range domains {
+		if domain != commonName {
+			san = append(san, domain)
+		}
+	}
+
+	csrDER, err := certcrypto.CreateCSR(privateKey, certcrypto.CSROptions{
+		Domain:     commonName,
+		SAN:        san,
+		MustStaple: mustStaple,
+	})
+	if err != nil {
+		return acme.ExtendedOrder{}, "", "", err
+	}
+
+	privateKeyPEM := normalizePEMString(string(certcrypto.PEMEncode(privateKey)))
+	csrPEM := normalizePEMString(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})))
+	return order, privateKeyPEM, csrPEM, nil
+}
+
 func (obj *legoAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*certificate.Resource, error) {
 	if orderState == nil {
 		return nil, fmt.Errorf("the HTTP-01 order state must not be nil")
@@ -741,15 +873,61 @@ func (obj *legoAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*ce
 		return nil, fmt.Errorf("the HTTP-01 finalize URL must not be empty")
 	}
 
+	challengeURLs := make([]string, 0, len(orderState.Challenges))
 	for _, challenge := range orderState.Challenges {
-		if _, err := obj.core.Challenges.New(challenge.ChallengeURL); err != nil {
+		challengeURLs = append(challengeURLs, challenge.ChallengeURL)
+	}
+
+	return obj.completeChallengeOrder(
+		"http-01",
+		orderState.OrderURL,
+		orderState.FinalizeURL,
+		orderState.PreferredChain,
+		orderState.PrivateKeyPEM,
+		orderState.CSRPEM,
+		orderState.Domains,
+		challengeURLs,
+	)
+}
+
+func (obj *legoAcmeClient) CompleteDNS01(orderState *acmeDNS01OrderState) (*certificate.Resource, error) {
+	if orderState == nil {
+		return nil, fmt.Errorf("the DNS-01 order state must not be nil")
+	}
+	if strings.TrimSpace(orderState.OrderURL) == "" {
+		return nil, fmt.Errorf("the DNS-01 order URL must not be empty")
+	}
+	if strings.TrimSpace(orderState.FinalizeURL) == "" {
+		return nil, fmt.Errorf("the DNS-01 finalize URL must not be empty")
+	}
+
+	challengeURLs := make([]string, 0, len(orderState.Challenges))
+	for _, challenge := range orderState.Challenges {
+		challengeURLs = append(challengeURLs, challenge.ChallengeURL)
+	}
+
+	return obj.completeChallengeOrder(
+		"dns-01",
+		orderState.OrderURL,
+		orderState.FinalizeURL,
+		orderState.PreferredChain,
+		orderState.PrivateKeyPEM,
+		orderState.CSRPEM,
+		orderState.Domains,
+		challengeURLs,
+	)
+}
+
+func (obj *legoAcmeClient) completeChallengeOrder(challengeName, orderURL, finalizeURL, preferredChain, privateKeyPEM, csrPEM string, domains []string, challengeURLs []string) (*certificate.Resource, error) {
+	for _, challengeURL := range challengeURLs {
+		if _, err := obj.core.Challenges.New(challengeURL); err != nil {
 			return nil, err
 		}
 	}
 
 	var readyOrder acme.ExtendedOrder
-	if err := wait.For("http-01 order readiness", 30*time.Second, 500*time.Millisecond, func() (bool, error) {
-		order, err := obj.core.Orders.Get(orderState.OrderURL)
+	if err := wait.For(challengeName+" order readiness", 30*time.Second, 500*time.Millisecond, func() (bool, error) {
+		order, err := obj.core.Orders.Get(orderURL)
 		if err != nil {
 			return false, err
 		}
@@ -767,20 +945,20 @@ func (obj *legoAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*ce
 	}
 
 	if readyOrder.Status != acme.StatusValid {
-		csrDER, err := decodeCSRPEM(orderState.CSRPEM)
+		csrDER, err := decodeCSRPEM(csrPEM)
 		if err != nil {
 			return nil, err
 		}
 
-		readyOrder, err = obj.core.Orders.UpdateForCSR(orderState.FinalizeURL, csrDER)
+		readyOrder, err = obj.core.Orders.UpdateForCSR(finalizeURL, csrDER)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if readyOrder.Status != acme.StatusValid {
-		if err := wait.For("http-01 certificate issuance", 30*time.Second, 500*time.Millisecond, func() (bool, error) {
-			order, err := obj.core.Orders.Get(orderState.OrderURL)
+		if err := wait.For(challengeName+" certificate issuance", 30*time.Second, 500*time.Millisecond, func() (bool, error) {
+			order, err := obj.core.Orders.Get(orderURL)
 			if err != nil {
 				return false, err
 			}
@@ -798,10 +976,10 @@ func (obj *legoAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*ce
 		}
 	}
 
-	return obj.http01CertificateResource(orderState, readyOrder)
+	return obj.certificateResourceFromOrder(domains, preferredChain, privateKeyPEM, csrPEM, readyOrder)
 }
 
-func (obj *legoAcmeClient) http01CertificateResource(orderState *acmeHTTP01OrderState, order acme.ExtendedOrder) (*certificate.Resource, error) {
+func (obj *legoAcmeClient) certificateResourceFromOrder(domains []string, preferredChain, privateKeyPEM, csrPEM string, order acme.ExtendedOrder) (*certificate.Resource, error) {
 	certs, err := obj.core.Certificates.GetAll(order.Certificate, true)
 	if err != nil {
 		return nil, err
@@ -813,9 +991,9 @@ func (obj *legoAcmeClient) http01CertificateResource(orderState *acmeHTTP01Order
 		return nil, fmt.Errorf("certificate response did not include the selected order certificate")
 	}
 
-	if orderState.PreferredChain != "" {
+	if preferredChain != "" {
 		for certURL, candidate := range certs {
-			match, err := hasPreferredChain(candidate.Issuer, orderState.PreferredChain)
+			match, err := hasPreferredChain(candidate.Issuer, preferredChain)
 			if err != nil {
 				return nil, err
 			}
@@ -828,13 +1006,13 @@ func (obj *legoAcmeClient) http01CertificateResource(orderState *acmeHTTP01Order
 	}
 
 	return &certificate.Resource{
-		Domain:            orderState.Domains[0],
+		Domain:            domains[0],
 		CertURL:           selectedURL,
 		CertStableURL:     selectedURL,
-		PrivateKey:        []byte(orderState.PrivateKeyPEM),
+		PrivateKey:        []byte(privateKeyPEM),
 		Certificate:       selected.Cert,
 		IssuerCertificate: selected.Issuer,
-		CSR:               []byte(orderState.CSRPEM),
+		CSR:               []byte(csrPEM),
 	}, nil
 }
 
@@ -877,118 +1055,100 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 		return nil, err
 	}
 
-	if obj.normalizedChallenge() == acmeChallengeHTTP01 && state.HTTP01 != nil {
-		if accountData != nil && state.DirectoryURL != "" && state.DirectoryURL != accountData.DirectoryURL {
+	switch obj.normalizedChallenge() {
+	case acmeChallengeHTTP01:
+		if state.DNS01 != nil {
 			plan.needsApply = true
-			plan.http01Prepare = true
-			plan.reason = "directory URL changed"
+			plan.prepare = true
+			plan.reason = "pending dns-01 order does not match requested challenge"
 			return plan, nil
 		}
-		if !state.HTTP01.matches(desiredDomains, string(keyType), obj.MustStaple, obj.PreferredChain) {
+		if state.HTTP01 != nil {
+			if accountData != nil && state.DirectoryURL != "" && state.DirectoryURL != accountData.DirectoryURL {
+				plan.needsApply = true
+				plan.prepare = true
+				plan.reason = "directory URL changed"
+				return plan, nil
+			}
+			if !state.HTTP01.matches(desiredDomains, string(keyType), obj.MustStaple, obj.PreferredChain) {
+				plan.needsApply = true
+				plan.prepare = true
+				plan.reason = "pending http-01 order configuration changed"
+				return plan, nil
+			}
 			plan.needsApply = true
-			plan.http01Prepare = true
-			plan.reason = "pending http-01 order configuration changed"
+			plan.complete = true
+			plan.reason = "http-01 order is pending"
 			return plan, nil
 		}
+
+	case acmeChallengeDNS01:
+		if state.HTTP01 != nil {
+			plan.needsApply = true
+			plan.prepare = true
+			plan.reason = "pending http-01 order does not match requested challenge"
+			return plan, nil
+		}
+		if state.DNS01 != nil {
+			if accountData != nil && state.DirectoryURL != "" && state.DirectoryURL != accountData.DirectoryURL {
+				plan.needsApply = true
+				plan.prepare = true
+				plan.reason = "directory URL changed"
+				return plan, nil
+			}
+			if !state.DNS01.matches(desiredDomains, string(keyType), obj.MustStaple, obj.PreferredChain) {
+				plan.needsApply = true
+				plan.prepare = true
+				plan.reason = "pending dns-01 order configuration changed"
+				return plan, nil
+			}
+			plan.needsApply = true
+			plan.complete = true
+			plan.reason = "dns-01 order is pending"
+			return plan, nil
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported challenge: %s", obj.Challenge)
+	}
+
+	requestPrepare := func(reason string) (*acmePlan, error) {
 		plan.needsApply = true
-		plan.http01Complete = true
-		plan.reason = "http-01 order is pending"
+		plan.prepare = true
+		plan.reason = reason
 		return plan, nil
 	}
 
 	if !state.hasCertificateMaterial() {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.reissue = true
-		}
-		plan.reason = "certificate is missing"
-		return plan, nil
+		return requestPrepare("certificate is missing")
 	}
 
 	if accountData != nil && state.DirectoryURL != "" && state.DirectoryURL != accountData.DirectoryURL {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.reissue = true
-		}
-		plan.reason = "directory URL changed"
-		return plan, nil
+		return requestPrepare("directory URL changed")
 	}
 	if !stringSliceEqual(state.Domains, desiredDomains) {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.reissue = true
-		}
-		plan.reason = "domains changed"
-		return plan, nil
+		return requestPrepare("domains changed")
 	}
 	if !strings.EqualFold(state.KeyType, string(keyType)) {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.reissue = true
-		}
-		plan.reason = "certificate key type changed"
-		return plan, nil
+		return requestPrepare("certificate key type changed")
 	}
 
 	leaf, err := state.leafCert()
 	if err != nil {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.reissue = true
-		}
-		plan.reason = "stored certificate could not be parsed"
-		return plan, nil
+		return requestPrepare("stored certificate could not be parsed")
 	}
 
 	if refresh {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.renew = true
-		}
-		plan.reason = "resource received a refresh"
-		return plan, nil
+		return requestPrepare("resource received a refresh")
 	}
 	if state.MustStaple != obj.MustStaple {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.renew = true
-		}
-		plan.reason = "must_staple changed"
-		return plan, nil
+		return requestPrepare("must_staple changed")
 	}
 	if state.PreferredChain != obj.PreferredChain {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.renew = true
-		}
-		plan.reason = "preferred_chain changed"
-		return plan, nil
+		return requestPrepare("preferred_chain changed")
 	}
 	if now.Add(obj.renewBefore()).After(leaf.NotAfter) {
-		plan.needsApply = true
-		if obj.normalizedChallenge() == acmeChallengeHTTP01 {
-			plan.http01Prepare = true
-		} else {
-			plan.renew = true
-		}
-		plan.reason = "certificate is within the renewal window"
-		return plan, nil
+		return requestPrepare("certificate is within the renewal window")
 	}
 
 	return plan, nil
@@ -1005,42 +1165,18 @@ func (obj *AcmeRes) reconcileState(state *acmeStoredState, plan *acmePlan, accou
 		return nil, errwrap.Wrapf(err, "could not create ACME client")
 	}
 
-	if obj.normalizedChallenge() == acmeChallengeHTTP01 {
+	switch obj.normalizedChallenge() {
+	case acmeChallengeHTTP01:
 		return obj.reconcileHTTP01State(next, accountData, client, plan)
+	case acmeChallengeDNS01:
+		return obj.reconcileDNS01State(next, accountData, client, plan)
+	default:
+		return nil, fmt.Errorf("unsupported challenge: %s", obj.Challenge)
 	}
-
-	switch {
-	case plan.reissue:
-		request := certificate.ObtainRequest{
-			Domains:        obj.desiredDomains(),
-			MustStaple:     obj.MustStaple,
-			Bundle:         true,
-			PreferredChain: obj.PreferredChain,
-		}
-		res, err := client.Obtain(request)
-		if err != nil {
-			return nil, errwrap.Wrapf(err, "could not obtain certificate")
-		}
-		next.setCertificateResource(res)
-
-	case plan.renew:
-		options := &certificate.RenewOptions{
-			Bundle:         true,
-			PreferredChain: obj.PreferredChain,
-			MustStaple:     obj.MustStaple,
-		}
-		res, err := client.Renew(next.certResource(), options)
-		if err != nil {
-			return nil, errwrap.Wrapf(err, "could not renew certificate")
-		}
-		next.setCertificateResource(res)
-	}
-
-	return obj.finalizeStateMetadata(next, accountData)
 }
 
 func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acmeAccountData, client acmeClient, plan *acmePlan) (*acmeStoredState, error) {
-	if plan.http01Prepare {
+	if plan.prepare {
 		orderState, err := client.BeginHTTP01(acmeHTTP01IssueRequest{
 			Domains:        obj.desiredDomains(),
 			MustStaple:     obj.MustStaple,
@@ -1051,6 +1187,7 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acm
 		}
 
 		next.HTTP01 = orderState
+		next.DNS01 = nil
 		next.Domain = ""
 		next.CertURL = ""
 		next.CertStableURL = ""
@@ -1066,7 +1203,7 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acm
 		return obj.finalizeStateMetadata(next, accountData)
 	}
 
-	if !plan.http01Complete || next.HTTP01 == nil {
+	if !plan.complete || next.HTTP01 == nil {
 		return obj.finalizeStateMetadata(next, accountData)
 	}
 
@@ -1074,8 +1211,8 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acm
 		return next, errwrap.Wrapf(err, "could not publish http-01 challenge state")
 	}
 
-	if !obj.http01Ready() {
-		obj.init.Logf("waiting for http01_ready before validating ACME HTTP-01 challenge")
+	if !obj.ready() {
+		obj.init.Logf("waiting for ready before validating ACME HTTP-01 challenge")
 		return obj.finalizeStateMetadata(next, accountData)
 	}
 
@@ -1103,6 +1240,76 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acm
 	next.HTTP01 = nil
 	if err := obj.clearHTTP01Challenges(context.Background()); err != nil {
 		return next, errwrap.Wrapf(err, "could not clear http-01 challenge state")
+	}
+
+	return obj.finalizeStateMetadata(next, accountData)
+}
+
+func (obj *AcmeRes) reconcileDNS01State(next *acmeStoredState, accountData *acmeAccountData, client acmeClient, plan *acmePlan) (*acmeStoredState, error) {
+	if plan.prepare {
+		orderState, err := client.BeginDNS01(acmeDNS01IssueRequest{
+			Domains:        obj.desiredDomains(),
+			MustStaple:     obj.MustStaple,
+			PreferredChain: obj.PreferredChain,
+		})
+		if err != nil {
+			return next, errwrap.Wrapf(err, "could not prepare dns-01 order")
+		}
+
+		next.DNS01 = orderState
+		next.HTTP01 = nil
+		next.Domain = ""
+		next.CertURL = ""
+		next.CertStableURL = ""
+		next.PrivateKeyPEM = ""
+		next.CertificatePEM = ""
+		next.IssuerCertificatePEM = ""
+		next.CSRPEM = ""
+
+		if err := obj.publishDNS01Challenges(context.Background(), orderState); err != nil {
+			return next, errwrap.Wrapf(err, "could not publish dns-01 challenge state")
+		}
+
+		return obj.finalizeStateMetadata(next, accountData)
+	}
+
+	if !plan.complete || next.DNS01 == nil {
+		return obj.finalizeStateMetadata(next, accountData)
+	}
+
+	if err := obj.publishDNS01Challenges(context.Background(), next.DNS01); err != nil {
+		return next, errwrap.Wrapf(err, "could not publish dns-01 challenge state")
+	}
+
+	if !obj.ready() {
+		obj.init.Logf("waiting for ready before validating ACME DNS-01 challenge")
+		return obj.finalizeStateMetadata(next, accountData)
+	}
+
+	ready, err := obj.dns01PresentationReady(context.Background(), next.DNS01)
+	if err != nil {
+		next.DNS01 = nil
+		_ = obj.clearDNS01Challenges(context.Background())
+		_, _ = obj.finalizeStateMetadata(next, accountData)
+		return next, errwrap.Wrapf(err, "dns-01 solver presentation failed")
+	}
+	if !ready {
+		obj.init.Logf("waiting for %s[%s] to present the DNS-01 challenge", acmeDNS01SolverKind, obj.normalizedSolver())
+		return obj.finalizeStateMetadata(next, accountData)
+	}
+
+	res, err := client.CompleteDNS01(next.DNS01)
+	if err != nil {
+		next.DNS01 = nil
+		_ = obj.clearDNS01Challenges(context.Background())
+		_, _ = obj.finalizeStateMetadata(next, accountData)
+		return next, errwrap.Wrapf(err, "could not complete dns-01 order")
+	}
+
+	next.setCertificateResource(res)
+	next.DNS01 = nil
+	if err := obj.clearDNS01Challenges(context.Background()); err != nil {
+		return next, errwrap.Wrapf(err, "could not clear dns-01 challenge state")
 	}
 
 	return obj.finalizeStateMetadata(next, accountData)
@@ -1178,6 +1385,57 @@ func (obj *AcmeRes) http01PresentationReady(ctx context.Context, orderState *acm
 	return false, nil
 }
 
+func (obj *AcmeRes) publishDNS01Challenges(ctx context.Context, orderState *acmeDNS01OrderState) error {
+	if obj.init == nil || obj.init.World == nil {
+		return fmt.Errorf("the World API is required")
+	}
+	if orderState == nil {
+		return storeAcmeDNS01ChallengeState(ctx, obj.init.World, obj.normalizedSolver(), nil)
+	}
+
+	challenges := make(map[string]acmeDNS01Challenge, len(orderState.Challenges))
+	for key, challenge := range orderState.Challenges {
+		challenges[key] = challenge
+	}
+	return storeAcmeDNS01ChallengeState(ctx, obj.init.World, obj.normalizedSolver(), &acmeDNS01ChallengeState{
+		Challenges: challenges,
+	})
+}
+
+func (obj *AcmeRes) clearDNS01Challenges(ctx context.Context) error {
+	if obj.init == nil || obj.init.World == nil {
+		return nil
+	}
+	return storeAcmeDNS01ChallengeState(ctx, obj.init.World, obj.normalizedSolver(), nil)
+}
+
+func (obj *AcmeRes) dns01PresentationReady(ctx context.Context, orderState *acmeDNS01OrderState) (bool, error) {
+	state, err := loadAcmeDNS01PresentationState(ctx, obj.init.World, obj.normalizedSolver())
+	if err != nil {
+		return false, err
+	}
+	if state == nil {
+		return false, nil
+	}
+
+	ready := len(orderState.Challenges) > 0
+	for key, challenge := range orderState.Challenges {
+		entry, exists := state.Entries[key]
+		if !exists || entry.Attempt != challenge.Attempt {
+			ready = false
+			break
+		}
+		if entry.Error != "" {
+			return false, fmt.Errorf("%s[%s] failed: %s", acmeDNS01SolverKind, obj.normalizedSolver(), entry.Error)
+		}
+		if !entry.Ready {
+			ready = false
+			break
+		}
+	}
+	return ready, nil
+}
+
 func (obj *AcmeRes) newLegoClient(_ *acmeStoredState, accountData *acmeAccountData) (acmeClient, error) {
 	if accountData == nil {
 		return nil, fmt.Errorf("account data is missing")
@@ -1193,37 +1451,6 @@ func (obj *AcmeRes) newLegoClient(_ *acmeStoredState, accountData *acmeAccountDa
 		return nil, err
 	}
 	baseClient.keyType = keyType
-
-	config := lego.NewConfig(baseClient.user)
-	config.CADirURL = accountData.DirectoryURL
-	config.Certificate.KeyType = keyType
-
-	challengeManager := resolver.NewSolversManager(baseClient.core)
-	prober := resolver.NewProber(challengeManager)
-	baseClient.certifier = certificate.NewCertifier(baseClient.core, prober, certificate.CertifierOptions{
-		KeyType:             config.Certificate.KeyType,
-		Timeout:             config.Certificate.Timeout,
-		OverallRequestLimit: config.Certificate.OverallRequestLimit,
-		DisableCommonName:   config.Certificate.DisableCommonName,
-	})
-
-	switch obj.normalizedChallenge() {
-	case acmeChallengeHTTP01:
-		// The explicit solver resource owns HTTP-01 presentation. We only need
-		// the low-level ACME API client here.
-
-	case acmeChallengeDNS01:
-		provider, err := obj.newDNSChallengeProvider()
-		if err != nil {
-			return nil, err
-		}
-		if err := challengeManager.SetDNS01Provider(provider); err != nil {
-			return nil, err
-		}
-
-	default:
-		return nil, fmt.Errorf("unsupported challenge: %s", obj.Challenge)
-	}
 
 	return baseClient, nil
 }
@@ -1255,105 +1482,6 @@ func (obj *AcmeRes) normalizedSolver() string {
 	return strings.TrimSpace(obj.Solver)
 }
 
-func (obj *AcmeRes) normalizedDNSProvider() string {
-	return strings.ToLower(strings.TrimSpace(obj.DNSProvider))
-}
-
-func (obj *AcmeRes) normalizedDNSEnv() map[string]string {
-	if len(obj.DNSEnv) == 0 {
-		return nil
-	}
-
-	out := make(map[string]string, len(obj.DNSEnv))
-	for key, value := range obj.DNSEnv {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func (obj *AcmeRes) validateDNSChallengeConfig() error {
-	if obj.normalizedChallenge() != acmeChallengeDNS01 {
-		if obj.normalizedDNSProvider() != "" {
-			return fmt.Errorf("the DNSProvider field is only valid when Challenge is %q", acmeChallengeDNS01)
-		}
-		if len(obj.normalizedDNSEnv()) > 0 {
-			return fmt.Errorf("the DNSEnv field is only valid when Challenge is %q", acmeChallengeDNS01)
-		}
-		return nil
-	}
-
-	if obj.normalizedDNSProvider() == "" {
-		return fmt.Errorf("the DNSProvider field must not be empty when Challenge is %q", acmeChallengeDNS01)
-	}
-	if len(obj.normalizedDNSEnv()) == 0 {
-		return fmt.Errorf("the DNSEnv field must not be empty when Challenge is %q", acmeChallengeDNS01)
-	}
-	for key := range obj.normalizedDNSEnv() {
-		if strings.Contains(key, "=") {
-			return fmt.Errorf("invalid DNSEnv key: %q", key)
-		}
-	}
-	if _, err := obj.newDNSChallengeProvider(); err != nil {
-		return errwrap.Wrapf(err, "invalid DNS challenge configuration")
-	}
-	return nil
-}
-
-func (obj *AcmeRes) newDNSChallengeProvider() (legochallenge.Provider, error) {
-	var provider legochallenge.Provider
-	err := obj.withDNSEnv(func() error {
-		var err error
-		provider, err = legodns.NewDNSChallengeProviderByName(obj.normalizedDNSProvider())
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return provider, nil
-}
-
-func (obj *AcmeRes) withDNSEnv(fn func() error) error {
-	env := obj.normalizedDNSEnv()
-	if len(env) == 0 {
-		return fn()
-	}
-
-	acmeDNSProviderEnvMu.Lock()
-	defer acmeDNSProviderEnvMu.Unlock()
-
-	previous := make(map[string]*string, len(env))
-	for key, value := range env {
-		if current, exists := os.LookupEnv(key); exists {
-			copy := current
-			previous[key] = &copy
-		} else {
-			previous[key] = nil
-		}
-		if err := os.Setenv(key, value); err != nil {
-			return err
-		}
-	}
-
-	defer func() {
-		for key, value := range previous {
-			if value == nil {
-				_ = os.Unsetenv(key)
-				continue
-			}
-			_ = os.Setenv(key, *value)
-		}
-	}()
-
-	return fn()
-}
-
 func (obj *AcmeRes) certificateKeyType() (certcrypto.KeyType, error) {
 	switch strings.ToLower(strings.TrimSpace(obj.KeyType)) {
 	case "", "rsa2048":
@@ -1377,19 +1505,16 @@ func (obj *AcmeRes) renewBefore() time.Duration {
 	return time.Duration(obj.RenewBeforeDays) * 24 * time.Hour
 }
 
-func (obj *AcmeRes) http01Ready() bool {
-	if obj.normalizedChallenge() != acmeChallengeHTTP01 {
+func (obj *AcmeRes) ready() bool {
+	if obj.Ready == nil {
 		return true
 	}
-	if obj.HTTP01Ready == nil {
-		return true
-	}
-	return *obj.HTTP01Ready
+	return *obj.Ready
 }
 
 func (obj *AcmeRes) buildSends(state *acmeStoredState, plan *acmePlan) *AcmeSends {
 	sends := &AcmeSends{
-		Pending:       (plan != nil && plan.needsApply) || (state != nil && state.HTTP01 != nil),
+		Pending:       (plan != nil && plan.needsApply) || (state != nil && state.hasPendingChallenge()),
 		HTTP01Pending: obj.normalizedChallenge() == acmeChallengeHTTP01 && ((plan != nil && plan.needsApply) || (state != nil && state.HTTP01 != nil)),
 	}
 	if state == nil || !state.hasCertificateMaterial() {
@@ -1435,6 +1560,13 @@ func (obj *AcmeRes) loadState() (*acmeStoredState, error) {
 		state.HTTP01.CSRPEM = normalizePEMString(state.HTTP01.CSRPEM)
 		if state.HTTP01.Challenges == nil {
 			state.HTTP01.Challenges = map[string]acmeHTTP01Challenge{}
+		}
+	}
+	if state.DNS01 != nil {
+		state.DNS01.PrivateKeyPEM = normalizePEMString(state.DNS01.PrivateKeyPEM)
+		state.DNS01.CSRPEM = normalizePEMString(state.DNS01.CSRPEM)
+		if state.DNS01.Challenges == nil {
+			state.DNS01.Challenges = map[string]acmeDNS01Challenge{}
 		}
 	}
 

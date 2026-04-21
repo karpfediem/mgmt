@@ -2,8 +2,9 @@
 #
 # HTTP-01 presentation is modelled explicitly through acme:solver:http01 and a
 # grouped http:server resource.
-# For staged HTTP-01 setups, http01_pending can drive temporary reachability
-# resources and http01_ready can release the challenge once they are in place.
+# For staged challenge setups, http01_pending can still drive temporary
+# reachability resources and ready can release validation once they are in
+# place.
 
 http:server "public-80" {
   address => ":80",
@@ -25,7 +26,22 @@ acme:request "example.com" {
   domains => ["example.com", "www.example.com"],
   challenge => "http-01",
   solver => "public-http01",
-  http01_ready => true,
+  ready => true,
+}
+
+acme:solver:dns01 "public-dns01" {
+  provider => "cloudflare",
+  env => {
+    "CLOUDFLARE_DNS_API_TOKEN" => "replace-me",
+  },
+}
+
+acme:request "wildcard.example.com" {
+  account => "letsencrypt-staging",
+  domains => ["example.com", "*.example.com"],
+  challenge => "dns-01",
+  solver => "public-dns01",
+  ready => true,
 }
 
 file "/etc/ssl/example.com/fullchain.pem" {

@@ -89,18 +89,18 @@ func fakeAcmeInit(t *testing.T, refresh bool, world *fakeWorld) (*engine.Init, f
 }
 
 type fakeAcmeClient struct {
-	accountKeyPEM  string
-	registration   *registration.Resource
-	obtainResult   *certificate.Resource
-	renewResult    *certificate.Resource
-	beginResult    *acmeHTTP01OrderState
-	completeResult *certificate.Resource
+	accountKeyPEM        string
+	registration         *registration.Resource
+	beginHTTP01Result    *acmeHTTP01OrderState
+	completeHTTP01Result *certificate.Resource
+	beginDNS01Result     *acmeDNS01OrderState
+	completeDNS01Result  *certificate.Resource
 
-	ensureCalls   int
-	obtainCalls   int
-	renewCalls    int
-	beginCalls    int
-	completeCalls int
+	ensureCalls         int
+	beginHTTP01Calls    int
+	completeHTTP01Calls int
+	beginDNS01Calls     int
+	completeDNS01Calls  int
 }
 
 func (obj *fakeAcmeClient) AccountKeyPEM() string {
@@ -112,24 +112,24 @@ func (obj *fakeAcmeClient) EnsureRegistration(emailChanged, acceptTOS bool) (*re
 	return obj.registration, nil
 }
 
-func (obj *fakeAcmeClient) Obtain(req certificate.ObtainRequest) (*certificate.Resource, error) {
-	obj.obtainCalls++
-	return obj.obtainResult, nil
-}
-
-func (obj *fakeAcmeClient) Renew(certRes certificate.Resource, opts *certificate.RenewOptions) (*certificate.Resource, error) {
-	obj.renewCalls++
-	return obj.renewResult, nil
-}
-
 func (obj *fakeAcmeClient) BeginHTTP01(req acmeHTTP01IssueRequest) (*acmeHTTP01OrderState, error) {
-	obj.beginCalls++
-	return obj.beginResult, nil
+	obj.beginHTTP01Calls++
+	return obj.beginHTTP01Result, nil
 }
 
 func (obj *fakeAcmeClient) CompleteHTTP01(orderState *acmeHTTP01OrderState) (*certificate.Resource, error) {
-	obj.completeCalls++
-	return obj.completeResult, nil
+	obj.completeHTTP01Calls++
+	return obj.completeHTTP01Result, nil
+}
+
+func (obj *fakeAcmeClient) BeginDNS01(req acmeDNS01IssueRequest) (*acmeDNS01OrderState, error) {
+	obj.beginDNS01Calls++
+	return obj.beginDNS01Result, nil
+}
+
+func (obj *fakeAcmeClient) CompleteDNS01(orderState *acmeDNS01OrderState) (*certificate.Resource, error) {
+	obj.completeDNS01Calls++
+	return obj.completeDNS01Result, nil
 }
 
 func mustStoreTestAcmeAccountState(t *testing.T, world *fakeWorld, name, directoryURL string) {
@@ -147,29 +147,45 @@ func mustStoreTestAcmeAccountState(t *testing.T, world *fakeWorld, name, directo
 	}
 }
 
-func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
+func TestAcmeCheckApplyPreparesDNS01BeforeReady(t *testing.T) {
 	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
-	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
+	ready := false
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 
 	client := &fakeAcmeClient{
 		accountKeyPEM: "ACCOUNT\n",
 		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
-		obtainResult: &certificate.Resource{
-			Domain:            "example.com",
-			CertURL:           "https://example.test/cert/1",
-			CertStableURL:     "https://example.test/cert/stable/1",
-			PrivateKey:        []byte(key),
-			Certificate:       []byte(fullchain),
-			IssuerCertificate: []byte(issuer),
+		beginDNS01Result: &acmeDNS01OrderState{
+			Attempt:        "attempt-1",
+			Domains:        []string{"example.com"},
+			KeyType:        "2048",
+			MustStaple:     false,
+			PreferredChain: "",
+			OrderURL:       "https://example.test/order/1",
+			FinalizeURL:    "https://example.test/order/1/finalize",
+			PrivateKeyPEM:  "PRIVATE KEY\n",
+			CSRPEM:         "CSR\n",
+			Challenges: map[string]acmeDNS01Challenge{
+				"challenge-1": {
+					Attempt:          "attempt-1",
+					Domain:           "example.com",
+					Token:            "token",
+					KeyAuthorization: "key-authorization",
+					FQDN:             "_acme-challenge.example.com.",
+					Value:            "txt-value",
+					ChallengeURL:     "https://example.test/challenge/1",
+				},
+			},
 		},
 	}
-	world := newFakeWorld("test-host")
-	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
 
 	res := &AcmeRes{
 		Account:   "public-ca",
-		Domains:   []string{"example.com", "www.example.com"},
+		Domains:   []string{"example.com"},
 		Challenge: acmeChallengeDNS01,
+		Solver:    "public-dns01",
+		Ready:     &ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
@@ -185,13 +201,135 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 		t.Fatalf("checkapply failed: %v", err)
 	}
 	if checkOK {
-		t.Fatalf("expected checkOK to be false after issuing a certificate")
+		t.Fatalf("expected checkOK to be false while preparing dns-01")
 	}
-	if client.obtainCalls != 1 {
-		t.Fatalf("expected one obtain call, got %d", client.obtainCalls)
+	if client.beginDNS01Calls != 1 {
+		t.Fatalf("expected one BeginDNS01 call, got %d", client.beginDNS01Calls)
 	}
-	if client.renewCalls != 0 {
-		t.Fatalf("expected zero renew calls, got %d", client.renewCalls)
+	if client.completeDNS01Calls != 0 {
+		t.Fatalf("expected zero CompleteDNS01 calls, got %d", client.completeDNS01Calls)
+	}
+
+	payload := sent()
+	if !payload.Pending {
+		t.Fatalf("expected pending to be true while preparing dns-01")
+	}
+	if payload.HTTP01Pending {
+		t.Fatalf("expected http01_pending to be false for dns-01")
+	}
+	if payload.PrivateKey != "" {
+		t.Fatalf("expected no private key material while waiting for issuance")
+	}
+
+	state, err := res.loadState()
+	if err != nil {
+		t.Fatalf("loadState failed: %v", err)
+	}
+	if state.DNS01 == nil {
+		t.Fatalf("expected pending DNS-01 order state to be persisted")
+	}
+
+	challenges, err := loadAcmeDNS01ChallengeState(context.Background(), world, res.Solver)
+	if err != nil {
+		t.Fatalf("loadAcmeDNS01ChallengeState failed: %v", err)
+	}
+	if len(challenges.Challenges) != 1 {
+		t.Fatalf("expected one published challenge, got %d", len(challenges.Challenges))
+	}
+}
+
+func TestAcmeCheckApplyCompletesDNS01WhenReadyAndPresented(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	ready := true
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
+	fullchain, leaf, issuer, key := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
+
+	orderState := &acmeDNS01OrderState{
+		Attempt:        "attempt-1",
+		Domains:        []string{"example.com"},
+		KeyType:        "2048",
+		MustStaple:     false,
+		PreferredChain: "",
+		OrderURL:       "https://example.test/order/1",
+		FinalizeURL:    "https://example.test/order/1/finalize",
+		PrivateKeyPEM:  "PRIVATE KEY\n",
+		CSRPEM:         "CSR\n",
+		Challenges: map[string]acmeDNS01Challenge{
+			"challenge-1": {
+				Attempt:          "attempt-1",
+				Domain:           "example.com",
+				Token:            "token",
+				KeyAuthorization: "key-authorization",
+				FQDN:             "_acme-challenge.example.com.",
+				Value:            "txt-value",
+				ChallengeURL:     "https://example.test/challenge/1",
+			},
+		},
+	}
+
+	client := &fakeAcmeClient{
+		accountKeyPEM: "ACCOUNT\n",
+		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
+		completeDNS01Result: &certificate.Resource{
+			Domain:            "example.com",
+			CertURL:           "https://example.test/cert/1",
+			CertStableURL:     "https://example.test/cert/stable/1",
+			PrivateKey:        []byte(key),
+			Certificate:       []byte(fullchain),
+			IssuerCertificate: []byte(issuer),
+		},
+	}
+
+	res := &AcmeRes{
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeDNS01,
+		Solver:    "public-dns01",
+		Ready:     &ready,
+	}
+	init, sent := fakeAcmeInit(t, false, world)
+	if err := res.Init(init); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	res.nowFn = func() time.Time { return now }
+	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
+		return client, nil
+	}
+
+	if err := res.saveState(&acmeStoredState{
+		Version:      1,
+		DirectoryURL: "https://example.test/directory",
+		Domains:      []string{"example.com"},
+		KeyType:      "2048",
+		DNS01:        orderState,
+	}); err != nil {
+		t.Fatalf("saveState failed: %v", err)
+	}
+
+	if err := storeAcmeDNS01PresentationState(context.Background(), world, res.Solver, &acmeDNS01PresentationState{
+		Entries: map[string]acmeDNS01PresentationEntry{
+			"challenge-1": {
+				Attempt: "attempt-1",
+				Domain:  "example.com",
+				FQDN:    "_acme-challenge.example.com.",
+				Value:   "txt-value",
+				Ready:   true,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeDNS01PresentationState failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected checkOK to be false after completing dns-01 in this cycle")
+	}
+	if client.completeDNS01Calls != 1 {
+		t.Fatalf("expected one CompleteDNS01 call, got %d", client.completeDNS01Calls)
 	}
 
 	payload := sent()
@@ -201,99 +339,30 @@ func TestAcmeCheckApplyObtainsAndSendsPEM(t *testing.T) {
 	if payload.HTTP01Pending {
 		t.Fatalf("expected http01_pending to be false after successful issuance")
 	}
-	if payload.PrivateKey != normalizePEMString(key) {
-		t.Fatalf("unexpected private key payload")
-	}
 	if payload.Certificate != normalizePEMString(leaf) {
 		t.Fatalf("unexpected certificate payload")
 	}
 	if payload.FullChain != normalizePEMString(fullchain) {
 		t.Fatalf("unexpected fullchain payload")
 	}
-	if payload.NotAfter != now.Add(90*24*time.Hour).Unix() {
-		t.Fatalf("unexpected expiry timestamp: %d", payload.NotAfter)
-	}
-	select {
-	case <-res.recheckCh:
-	default:
-		t.Fatalf("expected successful issuance to queue an immediate recheck")
-	}
-}
 
-func TestAcmeCheckApplyRenewsNearExpiry(t *testing.T) {
-	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
-	currentFullchain, _, currentIssuer, currentKey := mustTestCertificatePEM(t, now.Add(-29*24*time.Hour), now.Add(20*24*time.Hour))
-	nextFullchain, nextLeaf, nextIssuer, nextKey := mustTestCertificatePEM(t, now, now.Add(90*24*time.Hour))
-
-	client := &fakeAcmeClient{
-		accountKeyPEM: "ACCOUNT\n",
-		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
-		renewResult: &certificate.Resource{
-			Domain:            "example.com",
-			CertURL:           "https://example.test/cert/2",
-			CertStableURL:     "https://example.test/cert/stable/2",
-			PrivateKey:        []byte(nextKey),
-			Certificate:       []byte(nextFullchain),
-			IssuerCertificate: []byte(nextIssuer),
-		},
-	}
-	world := newFakeWorld("test-host")
-	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
-
-	res := &AcmeRes{
-		Account:         "public-ca",
-		Domains:         []string{"example.com"},
-		Challenge:       acmeChallengeDNS01,
-		RenewBeforeDays: 30,
-	}
-	init, sent := fakeAcmeInit(t, false, world)
-	if err := res.Init(init); err != nil {
-		t.Fatalf("init failed: %v", err)
-	}
-	res.nowFn = func() time.Time { return now }
-	res.clientFactory = func(state *acmeStoredState, account *acmeAccountData) (acmeClient, error) {
-		return client, nil
-	}
-
-	state := &acmeStoredState{
-		Version:              1,
-		DirectoryURL:         "https://example.test/directory",
-		Domains:              []string{"example.com"},
-		KeyType:              "2048",
-		Domain:               "example.com",
-		CertURL:              "https://example.test/cert/1",
-		CertStableURL:        "https://example.test/cert/stable/1",
-		PrivateKeyPEM:        normalizePEMString(currentKey),
-		CertificatePEM:       normalizePEMString(currentFullchain),
-		IssuerCertificatePEM: normalizePEMString(currentIssuer),
-	}
-	if err := res.saveState(state); err != nil {
-		t.Fatalf("saveState failed: %v", err)
-	}
-
-	checkOK, err := res.CheckApply(context.Background(), true)
+	state, err := res.loadState()
 	if err != nil {
-		t.Fatalf("checkapply failed: %v", err)
+		t.Fatalf("loadState failed: %v", err)
 	}
-	if checkOK {
-		t.Fatalf("expected checkOK to be false after renewing a certificate")
+	if state.DNS01 != nil {
+		t.Fatalf("expected pending DNS-01 order state to be cleared")
 	}
-	if client.renewCalls != 1 {
-		t.Fatalf("expected one renew call, got %d", client.renewCalls)
+	if state.PrivateKeyPEM != normalizePEMString(key) {
+		t.Fatalf("expected issued private key to be persisted")
 	}
 
-	payload := sent()
-	if payload.Pending {
-		t.Fatalf("expected pending to be false after successful renewal")
+	challenges, err := loadAcmeDNS01ChallengeState(context.Background(), world, res.Solver)
+	if err != nil {
+		t.Fatalf("loadAcmeDNS01ChallengeState failed: %v", err)
 	}
-	if payload.HTTP01Pending {
-		t.Fatalf("expected http01_pending to be false after successful renewal")
-	}
-	if payload.Certificate != normalizePEMString(nextLeaf) {
-		t.Fatalf("unexpected renewed certificate payload")
-	}
-	if payload.FullChain != normalizePEMString(nextFullchain) {
-		t.Fatalf("unexpected renewed fullchain payload")
+	if len(challenges.Challenges) != 0 {
+		t.Fatalf("expected published challenges to be cleared")
 	}
 }
 
@@ -318,31 +387,27 @@ func TestAcmeValidateRequiresExplicitChallenge(t *testing.T) {
 	}
 }
 
-func TestAcmeValidateAcceptsDNSChallengeWithProviderEnv(t *testing.T) {
+func TestAcmeValidateAcceptsDNSChallengeWithSolver(t *testing.T) {
 	res := (&AcmeRes{}).Default().(*AcmeRes)
 	res.Account = "public-ca"
 	res.Domains = []string{"example.com"}
 	res.Challenge = acmeChallengeDNS01
-	res.DNSProvider = "cloudflare"
-	res.DNSEnv = map[string]string{
-		"CLOUDFLARE_DNS_API_TOKEN": "token",
-	}
+	res.Solver = "public-dns01"
 
 	if err := res.Validate(); err != nil {
 		t.Fatalf("expected DNS challenge config to validate, got: %v", err)
 	}
 }
 
-func TestAcmeValidateRejectsMissingDNSProviderEnv(t *testing.T) {
+func TestAcmeValidateRejectsMissingDNS01Solver(t *testing.T) {
 	res := (&AcmeRes{}).Default().(*AcmeRes)
 	res.Account = "public-ca"
 	res.Domains = []string{"example.com"}
 	res.Challenge = acmeChallengeDNS01
-	res.DNSProvider = "cloudflare"
 
 	err := res.Validate()
-	if err == nil || !strings.Contains(err.Error(), "DNSEnv") {
-		t.Fatalf("expected dns env validation error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "Solver") {
+		t.Fatalf("expected solver validation error, got: %v", err)
 	}
 }
 
@@ -365,6 +430,7 @@ func TestAcmeCheckApplyWaitsForSharedAccountState(t *testing.T) {
 		Account:   "public-ca",
 		Domains:   []string{"example.com"},
 		Challenge: acmeChallengeDNS01,
+		Solver:    "public-dns01",
 	}
 	init, sent := fakeAcmeInit(t, false, nil)
 	if err := res.Init(init); err != nil {
@@ -421,17 +487,17 @@ func TestAcmeCheckApplyPreparesHTTP01BeforeReady(t *testing.T) {
 		},
 	}
 	client := &fakeAcmeClient{
-		accountKeyPEM: "ACCOUNT\n",
-		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
-		beginResult:   orderState,
+		accountKeyPEM:     "ACCOUNT\n",
+		registration:      &registration.Resource{URI: "https://example.test/acct/1"},
+		beginHTTP01Result: orderState,
 	}
 
 	res := &AcmeRes{
-		Account:     "public-ca",
-		Domains:     []string{"example.com"},
-		Challenge:   acmeChallengeHTTP01,
-		Solver:      "public-http01",
-		HTTP01Ready: &http01Ready,
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeHTTP01,
+		Solver:    "public-http01",
+		Ready:     &http01Ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
@@ -449,11 +515,11 @@ func TestAcmeCheckApplyPreparesHTTP01BeforeReady(t *testing.T) {
 	if checkOK {
 		t.Fatalf("expected checkOK to be false while preparing http-01")
 	}
-	if client.beginCalls != 1 {
-		t.Fatalf("expected one BeginHTTP01 call, got %d", client.beginCalls)
+	if client.beginHTTP01Calls != 1 {
+		t.Fatalf("expected one BeginHTTP01 call, got %d", client.beginHTTP01Calls)
 	}
-	if client.completeCalls != 0 {
-		t.Fatalf("expected zero CompleteHTTP01 calls, got %d", client.completeCalls)
+	if client.completeHTTP01Calls != 0 {
+		t.Fatalf("expected zero CompleteHTTP01 calls, got %d", client.completeHTTP01Calls)
 	}
 
 	payload := sent()
@@ -515,7 +581,7 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	client := &fakeAcmeClient{
 		accountKeyPEM: "ACCOUNT\n",
 		registration:  &registration.Resource{URI: "https://example.test/acct/1"},
-		completeResult: &certificate.Resource{
+		completeHTTP01Result: &certificate.Resource{
 			Domain:            "example.com",
 			CertURL:           "https://example.test/cert/1",
 			CertStableURL:     "https://example.test/cert/stable/1",
@@ -526,11 +592,11 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	}
 
 	res := &AcmeRes{
-		Account:     "public-ca",
-		Domains:     []string{"example.com"},
-		Challenge:   acmeChallengeHTTP01,
-		Solver:      "public-http01",
-		HTTP01Ready: &http01Ready,
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeHTTP01,
+		Solver:    "public-http01",
+		Ready:     &http01Ready,
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {
@@ -571,8 +637,8 @@ func TestAcmeCheckApplyCompletesHTTP01WhenReadyAndPresented(t *testing.T) {
 	if checkOK {
 		t.Fatalf("expected checkOK to be false after completing http-01 in this cycle")
 	}
-	if client.completeCalls != 1 {
-		t.Fatalf("expected one CompleteHTTP01 call, got %d", client.completeCalls)
+	if client.completeHTTP01Calls != 1 {
+		t.Fatalf("expected one CompleteHTTP01 call, got %d", client.completeHTTP01Calls)
 	}
 
 	payload := sent()
@@ -615,6 +681,7 @@ func TestAcmeCheckApplyDNS01PendingDoesNotSetHTTP01Pending(t *testing.T) {
 		Account:   "public-ca",
 		Domains:   []string{"example.com"},
 		Challenge: acmeChallengeDNS01,
+		Solver:    "public-dns01",
 	}
 	init, sent := fakeAcmeInit(t, false, world)
 	if err := res.Init(init); err != nil {

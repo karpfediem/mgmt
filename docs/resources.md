@@ -54,13 +54,15 @@ The ACME resources are split into explicit account, request, and solver roles.
   from `acme:account`.
 * `acme:solver:http01`: presents explicit HTTP-01 challenge material through an
   `http:server`.
+* `acme:solver:dns01`: presents explicit DNS-01 challenge material through a
+  lego-backed DNS provider.
 
 Supported challenge values:
 
 * `http-01`: the recommended explicit mode uses `solver => "..."` with an
   `acme:solver:http01` resource grouped into an `http:server`.
-* `dns-01`: uses a lego-backed DNS provider selected by name with explicit
-  `dns_provider` and `dns_env` inputs.
+* `dns-01`: uses `solver => "..."` with an explicit `acme:solver:dns01`
+  resource that owns the provider selection and provider environment.
 
 The resulting PEM material from `acme:request` is available over Send/Recv so
 that resources such as file can write the certificate, full chain, and private
@@ -70,15 +72,19 @@ key to disk.
 resource through the distributed world store. The MCL interface is the
 explicit `account => "..."` reference.
 
-For staged `http-01` orchestration, Send/Recv also exposes `pending` and
-`http01_pending`. The optional `http01_ready` input can hold the actual
-challenge attempt until related resources such as temporary firewall rules have
-already converged.
+For staged challenge orchestration, Send/Recv also exposes `pending`, and
+`http01_pending` remains available when `challenge => "http-01"`. The optional
+`ready` input can hold the actual CA validation step until related resources
+such as temporary firewall rules have already converged.
 
 The `acme:solver:http01` resource is an explicit HTTP-01 presenter. It groups
 into an `http:server`, serves `/.well-known/acme-challenge/*` dynamically for
 active challenges, and keeps challenge presentation separate from the ACME
 transaction resource.
+
+The `acme:solver:dns01` resource is an explicit DNS-01 presenter. It owns the
+lego DNS provider configuration, presents TXT records for active challenges,
+and reports presentation readiness back through the distributed world store.
 
 ## Docker
 
