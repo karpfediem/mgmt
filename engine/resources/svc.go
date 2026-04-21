@@ -111,7 +111,19 @@ type SvcRes struct {
 	// Session specifies if this is for a system service (false) or a user
 	// session specific service (true).
 	Session bool `lang:"session" yaml:"session"` // user session (true) or system?
+
+	// RefreshAction specifies what happens when the resource receives a
+	// refresh. The default is reload-or-try-restart, which preserves the
+	// historical systemd behavior. Set this to try-restart when config or
+	// environment changes must restart a running service instead of using
+	// ExecReload if one exists.
+	RefreshAction string `lang:"refresh_action" yaml:"refresh_action"`
 }
+
+const (
+	SvcRefreshActionReloadOrTryRestart = "reload-or-try-restart"
+	SvcRefreshActionTryRestart         = "try-restart"
+)
 
 // Default returns some sensible defaults for this resource.
 func (obj *SvcRes) Default() engine.Res {
@@ -126,7 +138,17 @@ func (obj *SvcRes) Validate() error {
 	if obj.Startup != "enabled" && obj.Startup != "disabled" && obj.Startup != "" {
 		return fmt.Errorf("startup must be either `enabled` or `disabled` or undefined")
 	}
+	if action := obj.refreshAction(); action != SvcRefreshActionReloadOrTryRestart && action != SvcRefreshActionTryRestart {
+		return fmt.Errorf("refresh_action must be either `%s` or `%s` or undefined", SvcRefreshActionReloadOrTryRestart, SvcRefreshActionTryRestart)
+	}
 	return nil
+}
+
+func (obj *SvcRes) refreshAction() string {
+	if obj.RefreshAction == "" {
+		return SvcRefreshActionReloadOrTryRestart
+	}
+	return obj.RefreshAction
 }
 
 // Init runs some startup code for this resource.
@@ -572,13 +594,24 @@ func (obj *SvcRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 		obj.init.Logf("reloading...")
 	}
 
-	// From: https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html
-	// If a service is restarted that isn't running, it will be started
-	// unless the "Try" flavor is used in which case a service that isn't
-	// running is not affected by the restart. The "ReloadOrRestart" flavors
-	// attempt a reload if the unit supports it and use a restart otherwise.
-	if _, err := conn.ReloadOrTryRestartUnitContext(ctx, svc, SystemdUnitModeFail, result); err != nil {
-		return false, errwrap.Wrapf(err, "failed to reload unit")
+	refreshAction := obj.refreshAction()
+	switch refreshAction {
+	case SvcRefreshActionReloadOrTryRestart:
+		// From: https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html
+		// If a service is restarted that isn't running, it will be started
+		// unless the "Try" flavor is used in which case a service that isn't
+		// running is not affected by the restart. The "ReloadOrRestart"
+		// flavors attempt a reload if the unit supports it and use a restart
+		// otherwise.
+		if _, err := conn.ReloadOrTryRestartUnitContext(ctx, svc, SystemdUnitModeFail, result); err != nil {
+			return false, errwrap.Wrapf(err, "failed to refresh unit")
+		}
+	case SvcRefreshActionTryRestart:
+		if _, err := conn.TryRestartUnitContext(ctx, svc, SystemdUnitModeFail, result); err != nil {
+			return false, errwrap.Wrapf(err, "failed to refresh unit")
+		}
+	default:
+		return false, fmt.Errorf("unknown refresh_action: %s", refreshAction)
 	}
 
 	// TODO: Should we permanenty error after a long timeout here?
@@ -609,7 +642,14 @@ func (obj *SvcRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 		// pass
 
 	case SystemdUnitResultDone:
-		obj.init.Logf("service reloaded")
+		if refreshAction == SvcRefreshActionTryRestart {
+			obj.init.Logf("service restarted")
+		} else {
+			obj.init.Logf("service reloaded")
+		}
+
+	case SystemdUnitResultSkipped:
+		obj.init.Logf("service refresh skipped")
 
 	case SystemdUnitResultCanceled:
 		// TODO: should this be context.Canceled?
@@ -644,6 +684,9 @@ func (obj *SvcRes) Cmp(r engine.Res) error {
 	}
 	if obj.Session != res.Session {
 		return fmt.Errorf("the Session differs")
+	}
+	if obj.refreshAction() != res.refreshAction() {
+		return fmt.Errorf("the RefreshAction differs")
 	}
 
 	return nil
