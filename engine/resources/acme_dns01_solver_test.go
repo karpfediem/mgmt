@@ -35,6 +35,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/purpleidea/mgmt/engine"
 
@@ -113,7 +114,7 @@ func TestAcmeDNS01SolverPresentsActiveChallenge(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeDNS01ChallengeState failed: %v", err)
 	}
-	if err := res.syncDesiredState(context.Background()); err != nil {
+	if _, err := res.syncDesiredState(context.Background()); err != nil {
 		t.Fatalf("syncDesiredState failed: %v", err)
 	}
 
@@ -173,7 +174,7 @@ func TestAcmeDNS01SolverCleansUpRemovedChallenge(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeDNS01ChallengeState failed: %v", err)
 	}
-	if err := res.syncDesiredState(context.Background()); err != nil {
+	if _, err := res.syncDesiredState(context.Background()); err != nil {
 		t.Fatalf("syncDesiredState failed: %v", err)
 	}
 	if _, err := res.CheckApply(context.Background(), true); err != nil {
@@ -183,7 +184,7 @@ func TestAcmeDNS01SolverCleansUpRemovedChallenge(t *testing.T) {
 	if err := storeAcmeDNS01ChallengeState(context.Background(), world, res.Name(), nil); err != nil {
 		t.Fatalf("clearing challenge state failed: %v", err)
 	}
-	if err := res.syncDesiredState(context.Background()); err != nil {
+	if _, err := res.syncDesiredState(context.Background()); err != nil {
 		t.Fatalf("syncDesiredState failed: %v", err)
 	}
 
@@ -236,7 +237,7 @@ func TestAcmeDNS01SolverReportsProviderError(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeDNS01ChallengeState failed: %v", err)
 	}
-	if err := res.syncDesiredState(context.Background()); err != nil {
+	if _, err := res.syncDesiredState(context.Background()); err != nil {
 		t.Fatalf("syncDesiredState failed: %v", err)
 	}
 
@@ -286,7 +287,7 @@ func TestAcmeDNS01SolverReportsPropagationError(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeDNS01ChallengeState failed: %v", err)
 	}
-	if err := res.syncDesiredState(context.Background()); err != nil {
+	if _, err := res.syncDesiredState(context.Background()); err != nil {
 		t.Fatalf("syncDesiredState failed: %v", err)
 	}
 
@@ -310,5 +311,76 @@ func TestAcmeDNS01SolverReportsPropagationError(t *testing.T) {
 	}
 	if entry.Error == "" {
 		t.Fatalf("expected stored propagation error")
+	}
+}
+
+func TestAcmeDNS01SolverWatchIgnoresNoOpWakeup(t *testing.T) {
+	world := newFakeWorld("solver-a")
+	provider := &fakeDNSChallengeProvider{}
+	events := make(chan struct{}, 4)
+
+	res := &AcmeDNS01SolverRes{
+		Provider: "fake",
+		Env:      map[string]string{"TOKEN": "value"},
+		providerFactory: func(string, map[string]string) (legochallenge.Provider, error) {
+			return provider, nil
+		},
+		waitForPropagation: func(context.Context, acmeDNS01Challenge) error {
+			return nil
+		},
+	}
+	res.SetName("public-dns01")
+	if err := res.Init(&engine.Init{
+		Hostname: "solver-a",
+		Event: func(context.Context) error {
+			events <- struct{}{}
+			return nil
+		},
+		Send:  func(interface{}) error { return nil },
+		World: world,
+		Logf:  func(string, ...interface{}) {},
+	}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	challenge := acmeDNS01Challenge{
+		Attempt:          "attempt-1",
+		Domain:           "example.com",
+		Token:            "token",
+		KeyAuthorization: "key-authorization",
+		FQDN:             "_acme-challenge.example.com.",
+		Value:            "txt-value",
+		ChallengeURL:     "https://ca.test/challenge/1",
+	}
+	if err := storeAcmeDNS01ChallengeState(context.Background(), world, res.Name(), &acmeDNS01ChallengeState{
+		Challenges: map[string]acmeDNS01Challenge{
+			challenge.key(): challenge,
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeDNS01ChallengeState failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- res.Watch(ctx)
+	}()
+
+	waitForFakeWorldStrWatchers(t, world, acmeDNS01ChallengeStateKey(res.Name()), 1)
+	waitForTestEvent(t, events, "initial DNS-01 solver watch event")
+
+	sendFakeWorldStrWatchEvent(world, acmeDNS01ChallengeStateKey(res.Name()))
+	assertNoTestEvent(t, events, "DNS-01 solver event after a no-op wakeup")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Watch returned unexpected error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for Watch to exit")
 	}
 }

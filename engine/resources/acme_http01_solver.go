@@ -33,6 +33,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -222,10 +223,13 @@ func (obj *AcmeHTTP01SolverRes) Cleanup() error {
 	return storeAcmeHTTP01PresentationState(context.Background(), obj.init.World, obj.Name(), nil)
 }
 
-func (obj *AcmeHTTP01SolverRes) syncWorldState(ctx context.Context) error {
+func (obj *AcmeHTTP01SolverRes) syncWorldState(ctx context.Context) (bool, error) {
+	currentChallenges := obj.challengeSnapshot()
+	currentPresentation := obj.presentationSnapshot()
+
 	state, err := loadAcmeHTTP01ChallengeState(ctx, obj.init.World, obj.Name())
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	challenges := map[string]acmeHTTP01Challenge{}
@@ -249,7 +253,7 @@ func (obj *AcmeHTTP01SolverRes) syncWorldState(ctx context.Context) error {
 	}
 
 	if err := storeAcmeHTTP01PresentationState(ctx, obj.init.World, obj.Name(), &acmeHTTP01PresentationState{Entries: presentation}); err != nil {
-		return errwrap.Wrapf(err, "could not store HTTP-01 presentation state")
+		return false, errwrap.Wrapf(err, "could not store HTTP-01 presentation state")
 	}
 
 	obj.mutex.Lock()
@@ -257,7 +261,8 @@ func (obj *AcmeHTTP01SolverRes) syncWorldState(ctx context.Context) error {
 	obj.presentation = presentation
 	obj.mutex.Unlock()
 
-	return nil
+	changed := !reflect.DeepEqual(currentChallenges, challenges) || !reflect.DeepEqual(currentPresentation, presentation)
+	return changed, nil
 }
 
 // Watch is the primary listener for this resource and it outputs events.
@@ -267,7 +272,7 @@ func (obj *AcmeHTTP01SolverRes) Watch(ctx context.Context) error {
 		return err
 	}
 
-	if err := obj.syncWorldState(ctx); err != nil {
+	if _, err := obj.syncWorldState(ctx); err != nil {
 		return err
 	}
 	if err := obj.init.Event(ctx); err != nil {
@@ -283,8 +288,12 @@ func (obj *AcmeHTTP01SolverRes) Watch(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if err := obj.syncWorldState(ctx); err != nil {
+			changed, err := obj.syncWorldState(ctx)
+			if err != nil {
 				return err
+			}
+			if !changed {
+				continue
 			}
 
 		case <-ctx.Done():

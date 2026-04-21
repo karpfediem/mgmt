@@ -198,6 +198,39 @@ func (obj *AcmeRes) Cleanup() error {
 	return nil
 }
 
+type acmeWatchSnapshot struct {
+	account     *acmeAccountStoredState
+	http01State map[string]acmeHTTP01PresentationState
+	dns01State  *acmeDNS01PresentationState
+}
+
+func (obj *AcmeRes) watchSnapshot(ctx context.Context) (*acmeWatchSnapshot, error) {
+	snapshot := &acmeWatchSnapshot{}
+
+	accountState, err := loadAcmeAccountSharedState(ctx, obj.init.World, obj.Account)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.account = accountState
+
+	switch obj.normalizedChallenge() {
+	case acmeChallengeHTTP01:
+		http01State, err := loadAcmeHTTP01PresentationStates(ctx, obj.init.World, obj.normalizedSolver())
+		if err != nil {
+			return nil, err
+		}
+		snapshot.http01State = http01State
+	case acmeChallengeDNS01:
+		dns01State, err := loadAcmeDNS01PresentationState(ctx, obj.init.World, obj.normalizedSolver())
+		if err != nil {
+			return nil, err
+		}
+		snapshot.dns01State = dns01State
+	}
+
+	return snapshot, nil
+}
+
 // Watch is the primary listener for this resource and it outputs events.
 func (obj *AcmeRes) Watch(ctx context.Context) error {
 	var accountCh chan error
@@ -221,6 +254,11 @@ func (obj *AcmeRes) Watch(ctx context.Context) error {
 			return err
 		}
 		presentationCh = ch
+	}
+
+	snapshot, err := obj.watchSnapshot(ctx)
+	if err != nil {
+		return err
 	}
 
 	if err := obj.init.Event(ctx); err != nil {
@@ -258,6 +296,14 @@ func (obj *AcmeRes) Watch(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			nextSnapshot, err := obj.watchSnapshot(ctx)
+			if err != nil {
+				return err
+			}
+			if reflect.DeepEqual(snapshot, nextSnapshot) {
+				continue
+			}
+			snapshot = nextSnapshot
 
 		case err, ok := <-presentationCh:
 			if timer != nil {
@@ -269,6 +315,14 @@ func (obj *AcmeRes) Watch(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			nextSnapshot, err := obj.watchSnapshot(ctx)
+			if err != nil {
+				return err
+			}
+			if reflect.DeepEqual(snapshot, nextSnapshot) {
+				continue
+			}
+			snapshot = nextSnapshot
 
 		case <-timerChan(timer):
 			obj.init.Logf("certificate renewal window reached")

@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -209,10 +210,12 @@ func (obj *AcmeDNS01SolverRes) presentationSnapshot() map[string]acmeDNS01Presen
 	return out
 }
 
-func (obj *AcmeDNS01SolverRes) syncDesiredState(ctx context.Context) error {
+func (obj *AcmeDNS01SolverRes) syncDesiredState(ctx context.Context) (bool, error) {
+	currentDesired := obj.desiredSnapshot()
+
 	state, err := loadAcmeDNS01ChallengeState(ctx, obj.init.World, obj.Name())
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	desired := map[string]acmeDNS01Challenge{}
@@ -223,7 +226,7 @@ func (obj *AcmeDNS01SolverRes) syncDesiredState(ctx context.Context) error {
 	obj.mutex.Lock()
 	obj.desired = desired
 	obj.mutex.Unlock()
-	return nil
+	return !reflect.DeepEqual(currentDesired, desired), nil
 }
 
 func (obj *AcmeDNS01SolverRes) reconcile(ctx context.Context) error {
@@ -293,7 +296,7 @@ func (obj *AcmeDNS01SolverRes) Watch(ctx context.Context) error {
 		return err
 	}
 
-	if err := obj.syncDesiredState(ctx); err != nil {
+	if _, err := obj.syncDesiredState(ctx); err != nil {
 		return err
 	}
 	if err := obj.init.Event(ctx); err != nil {
@@ -309,8 +312,12 @@ func (obj *AcmeDNS01SolverRes) Watch(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if err := obj.syncDesiredState(ctx); err != nil {
+			changed, err := obj.syncDesiredState(ctx)
+			if err != nil {
 				return err
+			}
+			if !changed {
+				continue
 			}
 
 		case <-ctx.Done():

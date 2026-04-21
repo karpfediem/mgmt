@@ -904,6 +904,67 @@ func TestAcmeCheckApplyDNS01PendingDoesNotSetHTTP01Pending(t *testing.T) {
 	}
 }
 
+func TestAcmeWatchIgnoresNoOpHTTP01PresentationWakeup(t *testing.T) {
+	world := newFakeWorld("test-host")
+	mustStoreTestAcmeAccountState(t, world, "public-ca", "https://example.test/directory")
+
+	if err := storeAcmeHTTP01PresentationState(context.Background(), world, "public-http01", &acmeHTTP01PresentationState{
+		Entries: map[string]acmeHTTP01PresentationEntry{
+			"challenge-1": {
+				Attempt: "attempt-1",
+				Domain:  "example.com",
+				Path:    "/.well-known/acme-challenge/token-1",
+				Ready:   true,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeHTTP01PresentationState failed: %v", err)
+	}
+
+	res := &AcmeRes{
+		Account:   "public-ca",
+		Domains:   []string{"example.com"},
+		Challenge: acmeChallengeHTTP01,
+		Solver:    "public-http01",
+	}
+
+	init, _ := fakeAcmeInit(t, false, world)
+	events := make(chan struct{}, 4)
+	init.Event = func(context.Context) error {
+		events <- struct{}{}
+		return nil
+	}
+
+	if err := res.Init(init); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- res.Watch(ctx)
+	}()
+
+	waitForFakeWorldStrWatchers(t, world, acmeAccountStateKey(res.Account), 1)
+	waitForFakeWorldStrMapWatchers(t, world, acmeHTTP01PresentationStateKey(res.normalizedSolver()), 1)
+	waitForTestEvent(t, events, "initial ACME watch event")
+
+	sendFakeWorldStrMapWatchEvent(world, acmeHTTP01PresentationStateKey(res.normalizedSolver()))
+	assertNoTestEvent(t, events, "ACME watch event after a no-op HTTP-01 presentation wakeup")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Watch returned unexpected error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for Watch to exit")
+	}
+}
+
 func mustTestCertificatePEM(t *testing.T, notBefore, notAfter time.Time) (fullchain string, leaf string, issuer string, privateKey string) {
 	t.Helper()
 

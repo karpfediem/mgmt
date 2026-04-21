@@ -83,7 +83,7 @@ func TestAcmeHTTP01SolverServesActiveChallenge(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
 	}
-	if err := res.syncWorldState(context.Background()); err != nil {
+	if _, err := res.syncWorldState(context.Background()); err != nil {
 		t.Fatalf("syncWorldState failed: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestAcmeHTTP01SolverServesThroughHTTPServerGrouping(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
 	}
-	if err := solver.syncWorldState(context.Background()); err != nil {
+	if _, err := solver.syncWorldState(context.Background()); err != nil {
 		t.Fatalf("syncWorldState failed: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestAcmeHTTP01SolverRejectsUnhandledHost(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
 	}
-	if err := res.syncWorldState(context.Background()); err != nil {
+	if _, err := res.syncWorldState(context.Background()); err != nil {
 		t.Fatalf("syncWorldState failed: %v", err)
 	}
 
@@ -322,6 +322,69 @@ func TestAcmeHTTP01SolverWatchHandlesMultipleChallengeUpdates(t *testing.T) {
 		t.Fatalf("storing second challenge state failed: %v", err)
 	}
 	waitForHTTP01PresentationEntries(t, world, res.Name(), "solver-a", 2)
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Watch returned unexpected error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for Watch to exit")
+	}
+}
+
+func TestAcmeHTTP01SolverWatchIgnoresNoOpWakeup(t *testing.T) {
+	world := newFakeWorld("solver-a")
+	events := make(chan struct{}, 4)
+
+	res := &AcmeHTTP01SolverRes{
+		Server: "public-80",
+		Hosts:  []string{"example.com"},
+	}
+	res.SetName("public-http01")
+	if err := res.Init(&engine.Init{
+		Hostname: "solver-a",
+		Event: func(context.Context) error {
+			events <- struct{}{}
+			return nil
+		},
+		Send:  func(interface{}) error { return nil },
+		World: world,
+		Logf:  func(string, ...interface{}) {},
+	}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	challenge := acmeHTTP01Challenge{
+		Attempt:      "attempt-1",
+		Domain:       "example.com",
+		Token:        "token-1",
+		Path:         "/.well-known/acme-challenge/token-1",
+		Body:         "key-authorization-1",
+		ChallengeURL: "https://ca.test/challenge/1",
+	}
+	if err := storeAcmeHTTP01ChallengeState(context.Background(), world, res.Name(), &acmeHTTP01ChallengeState{
+		Challenges: map[string]acmeHTTP01Challenge{
+			challenge.key(): challenge,
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeHTTP01ChallengeState failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- res.Watch(ctx)
+	}()
+
+	waitForFakeWorldStrWatchers(t, world, acmeHTTP01ChallengeStateKey(res.Name()), 1)
+	waitForTestEvent(t, events, "initial HTTP-01 solver watch event")
+
+	sendFakeWorldStrWatchEvent(world, acmeHTTP01ChallengeStateKey(res.Name()))
+	assertNoTestEvent(t, events, "HTTP-01 solver event after a no-op wakeup")
 
 	cancel()
 	select {

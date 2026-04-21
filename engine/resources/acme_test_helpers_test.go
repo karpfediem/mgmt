@@ -35,6 +35,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"testing"
+	"time"
 
 	"github.com/purpleidea/mgmt/engine"
 	etcdinterfaces "github.com/purpleidea/mgmt/etcd/interfaces"
@@ -254,4 +256,82 @@ func (obj *fakeWorld) ResExport(context.Context, []*engine.ResExport) (bool, err
 
 func (obj *fakeWorld) ResDelete(context.Context, []*engine.ResDelete) (bool, error) {
 	return true, nil
+}
+
+func waitForFakeWorldStrWatchers(t *testing.T, world *fakeWorld, namespace string, count int) {
+	t.Helper()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		world.mu.Lock()
+		got := len(world.strWatchers[namespace])
+		world.mu.Unlock()
+		if got == count {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d string watcher(s) on %q", count, namespace)
+}
+
+func waitForFakeWorldStrMapWatchers(t *testing.T, world *fakeWorld, namespace string, count int) {
+	t.Helper()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		world.mu.Lock()
+		got := len(world.strMapWatchers[namespace])
+		world.mu.Unlock()
+		if got == count {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d string map watcher(s) on %q", count, namespace)
+}
+
+func sendFakeWorldStrWatchEvent(world *fakeWorld, namespace string) {
+	world.mu.Lock()
+	watchers := append([]chan error(nil), world.strWatchers[namespace]...)
+	world.mu.Unlock()
+
+	for _, ch := range watchers {
+		select {
+		case ch <- nil:
+		default:
+		}
+	}
+}
+
+func sendFakeWorldStrMapWatchEvent(world *fakeWorld, namespace string) {
+	world.mu.Lock()
+	watchers := append([]chan error(nil), world.strMapWatchers[namespace]...)
+	world.mu.Unlock()
+
+	for _, ch := range watchers {
+		select {
+		case ch <- nil:
+		default:
+		}
+	}
+}
+
+func waitForTestEvent(t *testing.T, ch <-chan struct{}, description string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func assertNoTestEvent(t *testing.T, ch <-chan struct{}, description string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+		t.Fatalf("unexpected %s", description)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
