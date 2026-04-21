@@ -717,6 +717,12 @@ Loop:
 				reterr = errwrap.Append(reterr, err) // permanent failure
 				continue
 			}
+			// Re-mark the resource as dirty when the worker actually consumes
+			// an event. The watch side sets this before sending, but that send
+			// can block until a previous Process run finishes, and that earlier
+			// run may have already restored stateOK by the time this queued
+			// event is finally received.
+			state.setDirty()
 			if obj.Debug {
 				obj.Logf("event received")
 			}
@@ -802,6 +808,7 @@ Loop:
 						reterr = errwrap.Append(reterr, e) // permanent failure
 						break LimitWait
 					}
+					state.setDirty()
 					if obj.Debug {
 						obj.Logf("event received in limit")
 					}
@@ -861,6 +868,7 @@ Loop:
 							reterr = errwrap.Append(reterr, e) // permanent failure
 							break RetryWait
 						}
+						state.setDirty()
 						if obj.Debug {
 							obj.Logf("event received in retry")
 						}
