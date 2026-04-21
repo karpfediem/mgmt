@@ -58,7 +58,7 @@ func (obj *fakeDNSChallengeProvider) CleanUp(domain, token, keyAuth string) erro
 	return obj.cleanupErr
 }
 
-func initFakeDNS01Solver(t *testing.T, world *fakeWorld, provider legochallenge.Provider) (*AcmeDNS01SolverRes, *AcmeDNS01SolverSends) {
+func initFakeDNS01Solver(t *testing.T, world *fakeWorld, provider legochallenge.Provider, waitForPropagation func(context.Context, acmeDNS01Challenge) error) (*AcmeDNS01SolverRes, *AcmeDNS01SolverSends) {
 	t.Helper()
 
 	sends := &AcmeDNS01SolverSends{}
@@ -68,6 +68,7 @@ func initFakeDNS01Solver(t *testing.T, world *fakeWorld, provider legochallenge.
 		providerFactory: func(string, map[string]string) (legochallenge.Provider, error) {
 			return provider, nil
 		},
+		waitForPropagation: waitForPropagation,
 	}
 	res.SetName("public-dns01")
 	if err := res.Init(&engine.Init{
@@ -92,7 +93,9 @@ func initFakeDNS01Solver(t *testing.T, world *fakeWorld, provider legochallenge.
 func TestAcmeDNS01SolverPresentsActiveChallenge(t *testing.T) {
 	world := newFakeWorld("solver-a")
 	provider := &fakeDNSChallengeProvider{}
-	res, sends := initFakeDNS01Solver(t, world, provider)
+	res, sends := initFakeDNS01Solver(t, world, provider, func(context.Context, acmeDNS01Challenge) error {
+		return nil
+	})
 
 	challenge := acmeDNS01Challenge{
 		Attempt:          "attempt-1",
@@ -150,7 +153,9 @@ func TestAcmeDNS01SolverPresentsActiveChallenge(t *testing.T) {
 func TestAcmeDNS01SolverCleansUpRemovedChallenge(t *testing.T) {
 	world := newFakeWorld("solver-a")
 	provider := &fakeDNSChallengeProvider{}
-	res, sends := initFakeDNS01Solver(t, world, provider)
+	res, sends := initFakeDNS01Solver(t, world, provider, func(context.Context, acmeDNS01Challenge) error {
+		return nil
+	})
 
 	challenge := acmeDNS01Challenge{
 		Attempt:          "attempt-1",
@@ -211,7 +216,9 @@ func TestAcmeDNS01SolverCleansUpRemovedChallenge(t *testing.T) {
 func TestAcmeDNS01SolverReportsProviderError(t *testing.T) {
 	world := newFakeWorld("solver-a")
 	provider := &fakeDNSChallengeProvider{presentErr: fmt.Errorf("present failed")}
-	res, sends := initFakeDNS01Solver(t, world, provider)
+	res, sends := initFakeDNS01Solver(t, world, provider, func(context.Context, acmeDNS01Challenge) error {
+		return nil
+	})
 
 	challenge := acmeDNS01Challenge{
 		Attempt:          "attempt-1",
@@ -253,5 +260,55 @@ func TestAcmeDNS01SolverReportsProviderError(t *testing.T) {
 	}
 	if entry.Error == "" {
 		t.Fatalf("expected stored presentation error")
+	}
+}
+
+func TestAcmeDNS01SolverReportsPropagationError(t *testing.T) {
+	world := newFakeWorld("solver-a")
+	provider := &fakeDNSChallengeProvider{}
+	res, sends := initFakeDNS01Solver(t, world, provider, func(context.Context, acmeDNS01Challenge) error {
+		return fmt.Errorf("propagation failed")
+	})
+
+	challenge := acmeDNS01Challenge{
+		Attempt:          "attempt-1",
+		Domain:           "example.com",
+		Token:            "token",
+		KeyAuthorization: "key-authorization",
+		FQDN:             "_acme-challenge.example.com.",
+		Value:            "txt-value",
+		ChallengeURL:     "https://ca.test/challenge/1",
+	}
+	if err := storeAcmeDNS01ChallengeState(context.Background(), world, res.Name(), &acmeDNS01ChallengeState{
+		Challenges: map[string]acmeDNS01Challenge{
+			challenge.key(): challenge,
+		},
+	}); err != nil {
+		t.Fatalf("storeAcmeDNS01ChallengeState failed: %v", err)
+	}
+	if err := res.syncDesiredState(context.Background()); err != nil {
+		t.Fatalf("syncDesiredState failed: %v", err)
+	}
+
+	if _, err := res.CheckApply(context.Background(), true); err != nil {
+		t.Fatalf("CheckApply failed: %v", err)
+	}
+	if sends.Ready {
+		t.Fatalf("expected ready to be false when propagation fails")
+	}
+	if sends.Error == "" {
+		t.Fatalf("expected an error when DNS propagation fails")
+	}
+
+	state, err := loadAcmeDNS01PresentationState(context.Background(), world, res.Name())
+	if err != nil {
+		t.Fatalf("loadAcmeDNS01PresentationState failed: %v", err)
+	}
+	entry, exists := state.Entries[challenge.key()]
+	if !exists {
+		t.Fatalf("expected presentation entry for failed challenge")
+	}
+	if entry.Error == "" {
+		t.Fatalf("expected stored propagation error")
 	}
 }

@@ -31,20 +31,33 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/purpleidea/mgmt/engine"
 	"github.com/purpleidea/mgmt/engine/traits"
 	"github.com/purpleidea/mgmt/util/errwrap"
 
 	legochallenge "github.com/go-acme/lego/v4/challenge"
+	legodns01 "github.com/go-acme/lego/v4/challenge/dns01"
+	"github.com/go-acme/lego/v4/platform/wait"
 	legodns "github.com/go-acme/lego/v4/providers/dns"
+	"github.com/miekg/dns"
 )
 
 const acmeDNS01SolverKind = "acme:solver:dns01"
+
+const (
+	acmeDNSDefaultPropagationTimeout = 60 * time.Second
+	acmeDNSDefaultPollingInterval    = 2 * time.Second
+	acmeDNSQueryTimeout              = 10 * time.Second
+	acmeDNSResolvConf                = "/etc/resolv.conf"
+)
 
 func init() {
 	engine.RegisterResource(acmeDNS01SolverKind, func() engine.Res { return &AcmeDNS01SolverRes{} })
@@ -68,8 +81,9 @@ type AcmeDNS01SolverRes struct {
 	// DNS provider factory.
 	Env map[string]string `lang:"env" yaml:"env"`
 
-	providerFactory func(string, map[string]string) (legochallenge.Provider, error)
-	provider        legochallenge.Provider
+	providerFactory    func(string, map[string]string) (legochallenge.Provider, error)
+	provider           legochallenge.Provider
+	waitForPropagation func(context.Context, acmeDNS01Challenge) error
 
 	mutex        *sync.RWMutex
 	desired      map[string]acmeDNS01Challenge
@@ -137,6 +151,9 @@ func (obj *AcmeDNS01SolverRes) Init(init *engine.Init) error {
 		return errwrap.Wrapf(err, "could not create DNS challenge provider")
 	}
 	obj.provider = provider
+	if obj.waitForPropagation == nil {
+		obj.waitForPropagation = obj.waitForDNSPropagation
+	}
 	obj.mutex = &sync.RWMutex{}
 	obj.desired = map[string]acmeDNS01Challenge{}
 	obj.active = map[string]acmeDNS01Challenge{}
@@ -241,6 +258,11 @@ func (obj *AcmeDNS01SolverRes) reconcile(ctx context.Context) error {
 		}
 
 		if err := obj.provider.Present(challenge.Domain, challenge.Token, challenge.KeyAuthorization); err != nil {
+			entry.Error = err.Error()
+			nextPresentation[key] = entry
+			continue
+		}
+		if err := obj.waitForPropagation(ctx, challenge); err != nil {
 			entry.Error = err.Error()
 			nextPresentation[key] = entry
 			continue
@@ -381,6 +403,126 @@ func newLegoDNSChallengeProvider(provider string, env map[string]string) (legoch
 		return nil, err
 	}
 	return result, nil
+}
+
+func (obj *AcmeDNS01SolverRes) waitForDNSPropagation(_ context.Context, challenge acmeDNS01Challenge) error {
+	timeout, interval := acmeDNSDefaultPropagationTimeout, acmeDNSDefaultPollingInterval
+	if provider, ok := obj.provider.(legochallenge.ProviderTimeout); ok {
+		timeout, interval = provider.Timeout()
+	}
+
+	time.Sleep(interval)
+	return wait.For("dns-01 propagation", timeout, interval, func() (bool, error) {
+		return acmeDNS01TXTVisible(challenge.FQDN, challenge.Value, acmeDNSRecursiveNameservers())
+	})
+}
+
+func acmeDNSRecursiveNameservers() []string {
+	config, err := dns.ClientConfigFromFile(acmeDNSResolvConf)
+	if err == nil && len(config.Servers) > 0 {
+		return legodns01.ParseNameservers(config.Servers)
+	}
+	return []string{
+		"google-public-dns-a.google.com:53",
+		"google-public-dns-b.google.com:53",
+	}
+}
+
+func acmeDNS01TXTVisible(fqdn, value string, recursiveNameservers []string) (bool, error) {
+	zone, err := legodns01.FindZoneByFqdnCustom(fqdn, recursiveNameservers)
+	if err != nil {
+		return false, err
+	}
+
+	msg, err := acmeDNSQuery(zone, dns.TypeNS, recursiveNameservers, true)
+	if err != nil {
+		return false, err
+	}
+
+	authoritative := []string{}
+	for _, answer := range msg.Answer {
+		nsRecord, ok := answer.(*dns.NS)
+		if !ok {
+			continue
+		}
+		authoritative = append(authoritative, strings.ToLower(nsRecord.Ns))
+	}
+	if len(authoritative) == 0 {
+		return false, fmt.Errorf("could not determine authoritative nameservers for %s", fqdn)
+	}
+
+	for _, nameserver := range authoritative {
+		server := net.JoinHostPort(nameserver, "53")
+		response, err := acmeDNSQuery(fqdn, dns.TypeTXT, []string{server}, false)
+		if err != nil {
+			return false, err
+		}
+		if response.Rcode != dns.RcodeSuccess {
+			return false, fmt.Errorf("NS %s returned %s for %s", server, dns.RcodeToString[response.Rcode], fqdn)
+		}
+
+		found := false
+		records := []string{}
+		for _, answer := range response.Answer {
+			txt, ok := answer.(*dns.TXT)
+			if !ok {
+				continue
+			}
+			record := strings.Join(txt.Txt, "")
+			records = append(records, record)
+			if record == value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, fmt.Errorf("NS %s did not return the expected TXT record [fqdn: %s, value: %s]: %s", server, fqdn, value, strings.Join(records, " ,"))
+		}
+	}
+
+	return true, nil
+}
+
+func acmeDNSQuery(fqdn string, rtype uint16, nameservers []string, recursive bool) (*dns.Msg, error) {
+	msg := new(dns.Msg)
+	msg.SetQuestion(fqdn, rtype)
+	msg.SetEdns0(4096, false)
+	if !recursive {
+		msg.RecursionDesired = false
+	}
+
+	if len(nameservers) == 0 {
+		return nil, fmt.Errorf("empty list of nameservers")
+	}
+
+	var result *dns.Msg
+	var err error
+	var errs error
+	for _, nameserver := range nameservers {
+		result, err = acmeDNSSendQuery(msg, nameserver)
+		if err == nil && len(result.Answer) > 0 {
+			break
+		}
+		errs = errors.Join(errs, err)
+	}
+	if err != nil {
+		return result, errs
+	}
+
+	return result, nil
+}
+
+func acmeDNSSendQuery(msg *dns.Msg, nameserver string) (*dns.Msg, error) {
+	udp := &dns.Client{Net: "udp", Timeout: acmeDNSQueryTimeout}
+	response, _, err := udp.Exchange(msg, nameserver)
+	if response != nil && response.Truncated {
+		tcp := &dns.Client{Net: "tcp", Timeout: acmeDNSQueryTimeout}
+		response, _, err = tcp.Exchange(msg, nameserver)
+	}
+	if err != nil {
+		return response, fmt.Errorf("DNS call error [ns=%s]: %w", nameserver, err)
+	}
+	return response, nil
 }
 
 func withLegoDNSEnv(env map[string]string, fn func() error) error {

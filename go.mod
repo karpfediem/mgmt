@@ -32,6 +32,7 @@ require (
 	github.com/kylelemons/godebug v1.1.0
 	github.com/leonelquinteros/gotext v1.7.2
 	github.com/metal-automata/fw v0.0.0-20260201142203-2928c3e2daea
+	github.com/miekg/dns v1.1.72
 	github.com/pin/tftp/v3 v3.1.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.23.2
@@ -47,6 +48,7 @@ require (
 	go.etcd.io/etcd/server/v3 v3.6.10
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	golang.org/x/crypto v0.50.0
+	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.43.0
 	golang.org/x/time v0.15.0
 	golang.org/x/tools v0.44.0
@@ -229,7 +231,6 @@ require (
 	github.com/mdlayher/raw v0.1.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mimuret/golang-iij-dpf v0.9.1 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -341,7 +342,6 @@ require (
 	golang.org/x/arch v0.16.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
