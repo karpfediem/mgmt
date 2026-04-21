@@ -44,6 +44,94 @@ import (
 	"golang.org/x/time/rate"
 )
 
+type sendChangeRes interface {
+	engine.SendableRes
+	SendChanged() bool
+	ResetSendChanged()
+}
+
+func collectGroupedResources(res engine.Res) []engine.Res {
+	resources := []engine.Res{res}
+
+	groupable, ok := res.(engine.GroupableRes)
+	if !ok {
+		return resources
+	}
+
+	process := append([]engine.GroupableRes{}, groupable.GetGroup()...)
+	for len(process) > 0 {
+		var current engine.GroupableRes
+		current, process = process[0], process[1:]
+
+		if groupedRes, ok := current.(engine.Res); ok {
+			resources = append(resources, groupedRes)
+		}
+		process = append(process, current.GetGroup()...)
+	}
+
+	return resources
+}
+
+func recvDependsOnSenders(recv map[string]*engine.Send, senders map[engine.SendableRes]struct{}) bool {
+	for _, send := range recv {
+		if send == nil || send.Res == nil {
+			continue
+		}
+		if _, exists := senders[send.Res]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func (obj *Engine) sendRecvDependents(vertex pgraph.Vertex) map[pgraph.Vertex]struct{} {
+	res, ok := vertex.(engine.Res)
+	if !ok {
+		return nil
+	}
+
+	senders := make(map[engine.SendableRes]struct{})
+	changedSenders := []sendChangeRes{}
+	for _, groupedRes := range collectGroupedResources(res) {
+		sendable, ok := groupedRes.(sendChangeRes)
+		if !ok || !sendable.SendChanged() {
+			continue
+		}
+		senders[sendable] = struct{}{}
+		changedSenders = append(changedSenders, sendable)
+	}
+	defer func() {
+		for _, sendable := range changedSenders {
+			sendable.ResetSendChanged()
+		}
+	}()
+
+	if len(senders) == 0 {
+		return nil
+	}
+
+	dependents := make(map[pgraph.Vertex]struct{})
+	for _, recvVertex := range obj.graph.Vertices() {
+		recvRes, ok := recvVertex.(engine.Res)
+		if !ok {
+			continue
+		}
+		for _, groupedRes := range collectGroupedResources(recvRes) {
+			recvable, ok := groupedRes.(engine.RecvableRes)
+			if !ok {
+				continue
+			}
+			if !recvDependsOnSenders(recvable.Recv(), senders) {
+				continue
+			}
+			dependents[recvVertex] = struct{}{}
+			break
+		}
+	}
+
+	return dependents
+}
+
 // OKTimestamp returns true if this vertex can run right now.
 func (obj *Engine) OKTimestamp(vertex pgraph.Vertex) bool {
 	return len(obj.BadTimestamps(vertex)) == 0
@@ -185,24 +273,11 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 	// to use *their* send/recv handle/implementation, which has to be setup
 	// properly by the parent resource during Init(). See: http:server:flag.
 	collectSendRecv := []engine.Res{} // found resources
-
-	if res, ok := vertex.(engine.RecvableRes); ok {
-		collectSendRecv = append(collectSendRecv, res)
-	}
-
-	// If we contain grouped resources, maybe someone inside wants to recv?
-	// This code is similar to the above and was added for http:server:ui.
-	// XXX: Maybe this block isn't needed, as mentioned we need to check!
-	if res, ok := vertex.(engine.GroupableRes); ok {
-		process := res.GetGroup() // look through these
-		for len(process) > 0 {    // recurse through any nesting
-			var x engine.GroupableRes
-			x, process = process[0], process[1:] // pop from front!
-
-			for _, g := range x.GetGroup() {
-				collectSendRecv = append(collectSendRecv, g.(engine.Res))
-			}
+	for _, groupedRes := range collectGroupedResources(res) {
+		if _, ok := groupedRes.(engine.RecvableRes); !ok {
+			continue
 		}
+		collectSendRecv = append(collectSendRecv, groupedRes)
 	}
 
 	//for _, g := res.GetGroup() // non-recursive, one-layer method
@@ -255,6 +330,8 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 	var refresh bool
 	var checkOK bool
 	var err error
+	sendRecvDependents := map[pgraph.Vertex]struct{}{}
+	sendRecvSelfDirty := false
 
 	// lookup the refresh (notification) variable
 	refresh = obj.RefreshPending(vertex) // do i need to perform a refresh?
@@ -309,6 +386,14 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 		// tell anyone about an exporting error.
 		err = exportErr
 	}
+	if err == nil {
+		sendRecvDependents = obj.sendRecvDependents(vertex)
+		if _, exists := sendRecvDependents[vertex]; exists {
+			sendRecvSelfDirty = true
+			delete(sendRecvDependents, vertex)
+			checkOK = false
+		}
+	}
 
 	if checkOK && err != nil { // should never return this way
 		return fmt.Errorf("%s: resource programming error: CheckApply(%t): %t, %+v", res, !noop, checkOK, err)
@@ -324,9 +409,7 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 	// if CheckApply ran without noop and without error, state should be good
 	if !noop && err == nil { // aka !noop || checkOK
 		state.tuid.StartTimer()
-		//state.mutex.Lock()
-		state.isStateOK.Store(true) // reset
-		//state.mutex.Unlock()
+		state.isStateOK.Store(!sendRecvSelfDirty)
 		if refresh {
 			obj.SetUpstreamRefresh(vertex, false) // refresh happened, clear the request
 			if isRefreshableRes {
@@ -354,41 +437,56 @@ func (obj *Engine) Process(ctx context.Context, vertex pgraph.Vertex) error {
 		if noop {
 			activity = false // no we didn't do work...
 		}
+		sendRecvActivity := sendRecvSelfDirty || len(sendRecvDependents) > 0
 
 		if activity { // add refresh flag to downstream edges...
 			obj.SetDownstreamRefresh(vertex, true)
 		}
 
 		// poke! (should (must?) be sync)
-		wg := &sync.WaitGroup{}
-		// update this timestamp *before* we poke or the poked
-		// nodes might fail due to having a too old timestamp!
-		state.mutex.Lock()                      // concurrent write start
-		state.timestamp = time.Now().UnixNano() // update timestamp (race)
-		state.mutex.Unlock()                    // concurrent write end
-		for _, v := range obj.graph.OutgoingGraphVertices(vertex) {
-			if !obj.OKTimestamp(v) {
-				// there is at least another one that will poke this...
-				continue
+		if activity || sendRecvActivity {
+			wg := &sync.WaitGroup{}
+			// update this timestamp *before* we poke or the poked
+			// nodes might fail due to having a too old timestamp!
+			state.mutex.Lock()                      // concurrent write start
+			state.timestamp = time.Now().UnixNano() // update timestamp (race)
+			state.mutex.Unlock()                    // concurrent write end
+
+			targets := make(map[pgraph.Vertex]struct{})
+			for _, v := range obj.graph.OutgoingGraphVertices(vertex) {
+				targets[v] = struct{}{}
+			}
+			for v := range sendRecvDependents {
+				targets[v] = struct{}{}
+			}
+			if sendRecvSelfDirty {
+				targets[vertex] = struct{}{}
 			}
 
-			// If we're pausing (or exiting) then we can skip poking
-			// so that the graph doesn't go on running forever until
-			// it's completely done. This is an optional feature and
-			// we can select it via ^C on user exit or via the GAPI.
-			if obj.fastPause.Load() {
-				obj.Logf("%s: fast pausing, poke skipped", res)
-				continue
-			}
+			for v := range targets {
+				if v != vertex && !obj.OKTimestamp(v) {
+					// there is at least another one that will poke this...
+					continue
+				}
 
-			// poke each vertex individually, in parallel...
-			wg.Add(1)
-			go func(vv pgraph.Vertex) {
-				defer wg.Done()
-				obj.state[vv].Poke()
-			}(v)
+				// If we're pausing (or exiting) then we can skip poking
+				// so that the graph doesn't go on running forever until
+				// it's completely done. This is an optional feature and
+				// we can select it via ^C on user exit or via the GAPI.
+				if obj.fastPause.Load() {
+					obj.Logf("%s: fast pausing, poke skipped", res)
+					continue
+				}
+
+				// poke each vertex individually, in parallel...
+				wg.Add(1)
+				go func(vv pgraph.Vertex) {
+					defer wg.Done()
+					obj.state[vv].Poke()
+				}(v)
+			}
+			wg.Wait()
 		}
-		wg.Wait()
 	}
 
 	return errwrap.Wrapf(err, "error during Process()")

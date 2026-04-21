@@ -30,6 +30,8 @@
 package traits
 
 import (
+	"reflect"
+
 	"github.com/purpleidea/mgmt/engine"
 )
 
@@ -37,7 +39,8 @@ import (
 // methods needed to implement sending from resources. You'll need to implement
 // the Sends method, and call the Send method in CheckApply via the Init API.
 type Sendable struct {
-	send interface{}
+	send        interface{}
+	sendChanged bool
 	//sendIsActive bool // TODO: public?
 
 	// Bug5819 works around issue https://github.com/golang/go/issues/5819
@@ -55,6 +58,7 @@ func (obj *Sendable) Sends() interface{} {
 // resource API and consumed that way.
 func (obj *Sendable) Send(st interface{}) error {
 	// TODO: can we (or should we) run the type checking here instead?
+	obj.sendChanged = !reflect.DeepEqual(obj.send, st)
 	obj.send = st
 	return nil
 }
@@ -62,6 +66,16 @@ func (obj *Sendable) Send(st interface{}) error {
 // Sent returns the struct of values that have been sent by this resource.
 func (obj *Sendable) Sent() interface{} {
 	return obj.send
+}
+
+// SendChanged reports whether the last Send call updated the sent payload.
+func (obj *Sendable) SendChanged() bool {
+	return obj.sendChanged
+}
+
+// ResetSendChanged clears the change marker after the engine has propagated it.
+func (obj *Sendable) ResetSendChanged() {
+	obj.sendChanged = false
 }
 
 // SendActive let's the resource know if it must send a value. This is usually

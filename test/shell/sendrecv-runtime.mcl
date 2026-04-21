@@ -1,0 +1,12 @@
+http:server ":18080" {
+}
+
+http:server:flag "/flag" {
+	key => "value",
+}
+
+file "/tmp/sendrecv-runtime-output" {
+	state => $const.res.file.state.exists,
+}
+
+Http:Server:Flag["/flag"].value -> File["/tmp/sendrecv-runtime-output"].content
