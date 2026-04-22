@@ -146,7 +146,7 @@ func (obj *HetznerVMVolumeRes) CheckApply(ctx context.Context, apply bool) (bool
 	}
 
 	if obj.State == HetznerStateAbsent {
-		if obj.volume.Server == nil {
+		if obj.volume.Server == nil || obj.volume.Server.ID != obj.server.ID {
 			return true, nil
 		}
 		if !apply {

@@ -150,6 +150,173 @@ func TestHetznerVMVolumeAbsentWhenVolumeMissing(t *testing.T) {
 	}
 }
 
+func TestHetznerVMVolumeAbsentWhenVolumeUnattached(t *testing.T) {
+	serverClient := &fakeHetznerServerLookupClient{
+		server: &hcloud.Server{ID: 1, Name: "api-db"},
+	}
+	volumeClient := &fakeHetznerVolumeClient{
+		volume: &hcloud.Volume{ID: 2, Name: "dolt-data"},
+	}
+
+	res := &HetznerVMVolumeRes{
+		APIToken:     "token",
+		State:        HetznerStateAbsent,
+		Server:       "api-db",
+		Volume:       "dolt-data",
+		WaitInterval: HetznerWaitIntervalDefault,
+		WaitTimeout:  HetznerWaitTimeoutDefault,
+		serverClient: serverClient,
+		volumeClient: volumeClient,
+		actionWaiter: &fakeHetznerActionWaiter{},
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("CheckApply failed: %v", err)
+	}
+	if !checkOK {
+		t.Fatalf("expected unattached volume to be converged for absent state")
+	}
+	if volumeClient.detachCalls != 0 {
+		t.Fatalf("expected no detach calls, got %d", volumeClient.detachCalls)
+	}
+}
+
+func TestHetznerVMVolumeAbsentWhenAttachedToConfiguredServer(t *testing.T) {
+	server := &hcloud.Server{ID: 1, Name: "api-db"}
+	serverClient := &fakeHetznerServerLookupClient{server: server}
+	volumeClient := &fakeHetznerVolumeClient{
+		volume: &hcloud.Volume{
+			ID:     2,
+			Name:   "dolt-data",
+			Server: server,
+		},
+	}
+	waiter := &fakeHetznerActionWaiter{}
+
+	res := &HetznerVMVolumeRes{
+		APIToken:     "token",
+		State:        HetznerStateAbsent,
+		Server:       "api-db",
+		Volume:       "dolt-data",
+		WaitInterval: HetznerWaitIntervalDefault,
+		WaitTimeout:  HetznerWaitTimeoutDefault,
+		serverClient: serverClient,
+		volumeClient: volumeClient,
+		actionWaiter: waiter,
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("CheckApply(false) failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected attached target volume to report non-converged before detach")
+	}
+	if volumeClient.detachCalls != 0 {
+		t.Fatalf("expected no detach calls during dry run, got %d", volumeClient.detachCalls)
+	}
+
+	checkOK, err = res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("CheckApply(true) failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected detach apply to report non-converged")
+	}
+	if volumeClient.detachCalls != 1 {
+		t.Fatalf("expected one detach call, got %d", volumeClient.detachCalls)
+	}
+	if len(waiter.actions) != 1 {
+		t.Fatalf("expected waiter to observe one action, got %d", len(waiter.actions))
+	}
+}
+
+func TestHetznerVMVolumeAbsentWhenAttachedToDifferentServer(t *testing.T) {
+	serverClient := &fakeHetznerServerLookupClient{
+		server: &hcloud.Server{ID: 1, Name: "api-db"},
+	}
+	volumeClient := &fakeHetznerVolumeClient{
+		volume: &hcloud.Volume{
+			ID:   2,
+			Name: "dolt-data",
+			Server: &hcloud.Server{
+				ID:   99,
+				Name: "old-node",
+			},
+		},
+	}
+
+	res := &HetznerVMVolumeRes{
+		APIToken:     "token",
+		State:        HetznerStateAbsent,
+		Server:       "api-db",
+		Volume:       "dolt-data",
+		WaitInterval: HetznerWaitIntervalDefault,
+		WaitTimeout:  HetznerWaitTimeoutDefault,
+		serverClient: serverClient,
+		volumeClient: volumeClient,
+		actionWaiter: &fakeHetznerActionWaiter{},
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("CheckApply(false) failed: %v", err)
+	}
+	if !checkOK {
+		t.Fatalf("expected attachment to a different server to be converged for absent state")
+	}
+
+	checkOK, err = res.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("CheckApply(true) failed: %v", err)
+	}
+	if !checkOK {
+		t.Fatalf("expected apply to remain converged when volume is attached elsewhere")
+	}
+	if volumeClient.detachCalls != 0 {
+		t.Fatalf("expected no detach calls, got %d", volumeClient.detachCalls)
+	}
+}
+
+func TestHetznerVMVolumePresentWhenAttachedToConfiguredServer(t *testing.T) {
+	server := &hcloud.Server{ID: 1, Name: "api-db"}
+	serverClient := &fakeHetznerServerLookupClient{server: server}
+	volumeClient := &fakeHetznerVolumeClient{
+		volume: &hcloud.Volume{
+			ID:     2,
+			Name:   "dolt-data",
+			Server: server,
+		},
+	}
+
+	res := &HetznerVMVolumeRes{
+		APIToken:     "token",
+		State:        HetznerStateExists,
+		Server:       "api-db",
+		Volume:       "dolt-data",
+		WaitInterval: HetznerWaitIntervalDefault,
+		WaitTimeout:  HetznerWaitTimeoutDefault,
+		serverClient: serverClient,
+		volumeClient: volumeClient,
+		actionWaiter: &fakeHetznerActionWaiter{},
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("CheckApply failed: %v", err)
+	}
+	if !checkOK {
+		t.Fatalf("expected present state to converge when already attached to configured server")
+	}
+	if volumeClient.attachCalls != 0 {
+		t.Fatalf("expected no attach calls, got %d", volumeClient.attachCalls)
+	}
+	if volumeClient.detachCalls != 0 {
+		t.Fatalf("expected no detach calls, got %d", volumeClient.detachCalls)
+	}
+}
+
 func TestHetznerVMVolumeCmp(t *testing.T) {
 	left := &HetznerVMVolumeRes{
 		APIToken:     "token",
