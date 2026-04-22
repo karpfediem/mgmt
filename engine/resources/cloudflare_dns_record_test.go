@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -46,14 +47,14 @@ func TestCloudflareDNSRecordResCheckApplyCreatesRecord(t *testing.T) {
 
 	fixture := newCloudflareDNSTestFixture(t)
 	resource := newCloudflareDNSTestResource(fixture.server.URL)
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.Type = "CNAME"
-	resource.RecordName = "api.beta"
-	resource.Content = "beta-nbg1-api-db.example.net"
+	resource.RecordName = "api.edge"
+	resource.Content = "origin-api.example.net"
 	resource.TTL = 300
 	resource.Proxied = true
 	resource.Comment = "managed by mgmt"
-	resource.Tags = []string{"role:api", "env:beta"}
+	resource.Tags = []string{"role:api", "env:test"}
 
 	if err := resource.Validate(); err != nil {
 		t.Fatalf("validate failed: %v", err)
@@ -84,16 +85,16 @@ func TestCloudflareDNSRecordResCheckApplyCreatesRecord(t *testing.T) {
 		t.Fatalf("expected 1 record, got %d", len(records))
 	}
 	record := records[0]
-	if record.Name != "api.beta.fishystuff.fish" {
+	if record.Name != "api.edge.example.test" {
 		t.Fatalf("unexpected record name: %s", record.Name)
 	}
-	if record.Content != "beta-nbg1-api-db.example.net" {
+	if record.Content != "origin-api.example.net" {
 		t.Fatalf("unexpected record content: %s", record.Content)
 	}
 	if !record.Proxied {
 		t.Fatalf("expected proxied record")
 	}
-	if got := strings.Join(record.Tags, ","); got != "env:beta,role:api" {
+	if got := strings.Join(record.Tags, ","); got != "env:test,role:api" {
 		t.Fatalf("unexpected tags: %s", got)
 	}
 }
@@ -106,25 +107,25 @@ func TestCloudflareDNSRecordResCheckApplyUpdatesRecord(t *testing.T) {
 		{
 			ID:        "record-1",
 			Type:      "A",
-			Name:      "api.beta.fishystuff.fish",
+			Name:      "api.edge.example.test",
 			Content:   "203.0.113.10",
 			TTL:       120,
 			Proxied:   false,
 			Comment:   "old",
-			Tags:      []string{"env:beta"},
+			Tags:      []string{"env:test"},
 			Proxiable: true,
 		},
 	}
 
 	resource := newCloudflareDNSTestResource(fixture.server.URL)
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.Type = "A"
-	resource.RecordName = "api.beta"
+	resource.RecordName = "api.edge"
 	resource.Content = "203.0.113.22"
 	resource.TTL = 300
 	resource.Proxied = true
 	resource.Comment = "managed by mgmt"
-	resource.Tags = []string{"role:api", "env:beta"}
+	resource.Tags = []string{"role:api", "env:test"}
 
 	if err := resource.Validate(); err != nil {
 		t.Fatalf("validate failed: %v", err)
@@ -169,24 +170,24 @@ func TestCloudflareDNSRecordResCheckApplyDeletesRecord(t *testing.T) {
 		{
 			ID:      "record-1",
 			Type:    "TXT",
-			Name:    "telemetry.beta.fishystuff.fish",
+			Name:    "telemetry.edge.example.test",
 			Content: "hello",
 			TTL:     300,
 		},
 		{
 			ID:      "record-2",
 			Type:    "TXT",
-			Name:    "telemetry.beta.fishystuff.fish",
+			Name:    "telemetry.edge.example.test",
 			Content: "world",
 			TTL:     300,
 		},
 	}
 
 	resource := newCloudflareDNSTestResource(fixture.server.URL)
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.State = CloudflareDNSStateAbsent
 	resource.Type = "TXT"
-	resource.RecordName = "telemetry.beta"
+	resource.RecordName = "telemetry.edge"
 	resource.Content = "hello"
 	resource.TTL = 300
 
@@ -217,14 +218,14 @@ func TestCloudflareDNSRecordResCheckApplyCreatesRecordSet(t *testing.T) {
 	fixture := newCloudflareDNSTestFixture(t)
 
 	resource := newCloudflareDNSTestResource(fixture.server.URL)
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.Type = "A"
-	resource.RecordName = "cdn.beta"
+	resource.RecordName = "cdn.edge"
 	resource.Contents = []string{"198.51.100.10", "198.51.100.11"}
 	resource.TTL = 300
 	resource.Proxied = true
 	resource.Comment = "managed by mgmt"
-	resource.Tags = []string{"service:cdn", "env:beta"}
+	resource.Tags = []string{"service:cdn", "env:test"}
 
 	if err := resource.Validate(); err != nil {
 		t.Fatalf("validate failed: %v", err)
@@ -267,6 +268,55 @@ func TestCloudflareDNSRecordResCheckApplyCreatesRecordSet(t *testing.T) {
 	}
 }
 
+func TestCloudflareDNSRecordResLookupRecordsSinglePagePreservesBehavior(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCloudflareDNSTestFixture(t)
+	fixture.zones = []cloudflareZone{
+		{ID: "zone-1", Name: "example.test"},
+	}
+	fixture.records["zone-1"] = []cloudflareDNSRecord{
+		{
+			ID:      "record-1",
+			Type:    "A",
+			Name:    "cdn.edge.example.test",
+			Content: "198.51.100.10",
+			TTL:     300,
+		},
+		{
+			ID:      "record-2",
+			Type:    "A",
+			Name:    "cdn.edge.example.test",
+			Content: "198.51.100.11",
+			TTL:     300,
+		},
+		{
+			ID:      "record-3",
+			Type:    "A",
+			Name:    "other.edge.example.test",
+			Content: "198.51.100.12",
+			TTL:     300,
+		},
+	}
+
+	resource := newCloudflareDNSTestResource(fixture.server.URL)
+	if err := resource.Init(nil); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	defer resource.Cleanup()
+
+	records, err := resource.lookupRecords(context.Background(), "zone-1", "cdn.edge.example.test", "A")
+	if err != nil {
+		t.Fatalf("lookuprecords failed: %v", err)
+	}
+	if got := cloudflareDNSTestContents(records); got != "198.51.100.10,198.51.100.11" {
+		t.Fatalf("unexpected record contents: %s", got)
+	}
+	if got := fixture.recordListPages(); !slices.Equal(got, []int{1}) {
+		t.Fatalf("unexpected lookup pages: %v", got)
+	}
+}
+
 func TestCloudflareDNSRecordResCheckApplyReconcilesRecordSet(t *testing.T) {
 	t.Parallel()
 
@@ -275,36 +325,36 @@ func TestCloudflareDNSRecordResCheckApplyReconcilesRecordSet(t *testing.T) {
 		{
 			ID:        "record-1",
 			Type:      "A",
-			Name:      "cdn.beta.fishystuff.fish",
+			Name:      "cdn.edge.example.test",
 			Content:   "198.51.100.10",
 			TTL:       120,
 			Proxied:   false,
 			Comment:   "old",
-			Tags:      []string{"env:beta"},
+			Tags:      []string{"env:test"},
 			Proxiable: true,
 		},
 		{
 			ID:        "record-2",
 			Type:      "A",
-			Name:      "cdn.beta.fishystuff.fish",
+			Name:      "cdn.edge.example.test",
 			Content:   "198.51.100.12",
 			TTL:       120,
 			Proxied:   false,
 			Comment:   "old",
-			Tags:      []string{"env:beta"},
+			Tags:      []string{"env:test"},
 			Proxiable: true,
 		},
 	}
 
 	resource := newCloudflareDNSTestResource(fixture.server.URL)
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.Type = "A"
-	resource.RecordName = "cdn.beta"
+	resource.RecordName = "cdn.edge"
 	resource.Contents = []string{"198.51.100.10", "198.51.100.11"}
 	resource.TTL = 300
 	resource.Proxied = true
 	resource.Comment = "managed by mgmt"
-	resource.Tags = []string{"service:cdn", "env:beta"}
+	resource.Tags = []string{"service:cdn", "env:test"}
 
 	if err := resource.Validate(); err != nil {
 		t.Fatalf("validate failed: %v", err)
@@ -339,13 +389,133 @@ func TestCloudflareDNSRecordResCheckApplyReconcilesRecordSet(t *testing.T) {
 	}
 }
 
+func TestCloudflareDNSRecordResCheckApplyReconcilesRecordSetAcrossPages(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCloudflareDNSTestFixture(t)
+	fixture.zones = []cloudflareZone{
+		{ID: "zone-1", Name: "example.test"},
+	}
+	desiredContents := make([]string, 0, 100)
+	fixture.records["zone-1"] = make([]cloudflareDNSRecord, 0, 101)
+	for i := 1; i <= 101; i++ {
+		content := fmt.Sprintf("198.51.100.%d", i)
+		fixture.records["zone-1"] = append(fixture.records["zone-1"], cloudflareDNSRecord{
+			ID:        fmt.Sprintf("record-%d", i),
+			Type:      "A",
+			Name:      "cdn.edge.example.test",
+			Content:   content,
+			TTL:       300,
+			Proxied:   true,
+			Comment:   "managed by mgmt",
+			Tags:      []string{"env:test", "service:cdn"},
+			Proxiable: true,
+		})
+		if i <= 100 {
+			desiredContents = append(desiredContents, content)
+		}
+	}
+
+	resource := newCloudflareDNSTestResource(fixture.server.URL)
+	resource.ZoneName = "example.test"
+	resource.Type = "A"
+	resource.RecordName = "cdn.edge"
+	resource.Contents = desiredContents
+	resource.TTL = 300
+	resource.Proxied = true
+	resource.Comment = "managed by mgmt"
+	resource.Tags = []string{"service:cdn", "env:test"}
+
+	if err := resource.Validate(); err != nil {
+		t.Fatalf("validate failed: %v", err)
+	}
+	if err := resource.Init(nil); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	defer resource.Cleanup()
+
+	checkOK, err := resource.CheckApply(context.Background(), true)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected reconcile to report non-converged after apply")
+	}
+	if got := fixture.recordListPages(); !slices.Equal(got, []int{1, 2}) {
+		t.Fatalf("expected paginated lookup across both pages, got %v", got)
+	}
+
+	records := fixture.recordsForZone("zone-1")
+	if len(records) != 100 {
+		t.Fatalf("expected 100 records after reconcile, got %d", len(records))
+	}
+	if got := cloudflareDNSTestContents(records); strings.Contains(got, "198.51.100.101") {
+		t.Fatalf("unexpected page-2 record retained after reconcile: %s", got)
+	}
+	createCalls, updateCalls, deleteCalls := fixture.mutationCounts()
+	if createCalls != 0 || updateCalls != 0 || deleteCalls != 1 {
+		t.Fatalf("unexpected mutation counts: create=%d update=%d delete=%d", createCalls, updateCalls, deleteCalls)
+	}
+}
+
+func TestCloudflareDNSRecordResCheckApplyFailsSafelyWithoutPaginationMetadata(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCloudflareDNSTestFixture(t)
+	fixture.zones = []cloudflareZone{
+		{ID: "zone-1", Name: "example.test"},
+	}
+	fixture.recordListIncludeResultInfo = false
+	fixture.records["zone-1"] = make([]cloudflareDNSRecord, 0, 101)
+	for i := 1; i <= 101; i++ {
+		fixture.records["zone-1"] = append(fixture.records["zone-1"], cloudflareDNSRecord{
+			ID:      fmt.Sprintf("record-%d", i),
+			Type:    "TXT",
+			Name:    "telemetry.edge.example.test",
+			Content: fmt.Sprintf("value-%03d", i),
+			TTL:     300,
+		})
+	}
+
+	resource := newCloudflareDNSTestResource(fixture.server.URL)
+	resource.ZoneName = "example.test"
+	resource.State = CloudflareDNSStateAbsent
+	resource.Type = "TXT"
+	resource.RecordName = "telemetry.edge"
+	resource.Content = "value-001"
+	resource.TTL = 300
+
+	if err := resource.Validate(); err != nil {
+		t.Fatalf("validate failed: %v", err)
+	}
+	if err := resource.Init(nil); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	defer resource.Cleanup()
+
+	checkOK, err := resource.CheckApply(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "cannot safely reconcile incomplete record set") {
+		t.Fatalf("expected pagination safety error, got: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected failed apply to report non-converged")
+	}
+	createCalls, updateCalls, deleteCalls := fixture.mutationCounts()
+	if createCalls != 0 || updateCalls != 0 || deleteCalls != 0 {
+		t.Fatalf("expected no mutations after pagination safety failure, got create=%d update=%d delete=%d", createCalls, updateCalls, deleteCalls)
+	}
+	if got := len(fixture.recordsForZone("zone-1")); got != 101 {
+		t.Fatalf("expected records to remain untouched after pagination safety failure, got %d", got)
+	}
+}
+
 func TestCloudflareDNSRecordResValidateRejectsDuplicateDesiredContent(t *testing.T) {
 	t.Parallel()
 
 	resource := newCloudflareDNSTestResource("https://example.invalid")
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.Type = "A"
-	resource.RecordName = "cdn.beta"
+	resource.RecordName = "cdn.edge"
 	resource.Content = "198.51.100.10"
 	resource.Contents = []string{"198.51.100.10"}
 
@@ -359,10 +529,10 @@ func TestCloudflareDNSRecordResValidateRejectsMultiValueCNAME(t *testing.T) {
 	t.Parallel()
 
 	resource := newCloudflareDNSTestResource("https://example.invalid")
-	resource.ZoneName = "fishystuff.fish"
+	resource.ZoneName = "example.test"
 	resource.Type = "CNAME"
-	resource.RecordName = "api.beta"
-	resource.Contents = []string{"one.example.net", "two.example.net"}
+	resource.RecordName = "api.edge"
+	resource.Contents = []string{"origin-a.example.net", "origin-b.example.net"}
 
 	err := resource.Validate()
 	if err == nil || !strings.Contains(err.Error(), "cname record sets can only contain one value") {
@@ -384,10 +554,16 @@ type cloudflareDNSTestFixture struct {
 	t      *testing.T
 	server *httptest.Server
 
-	mu      sync.Mutex
-	nextID  int
-	zones   []cloudflareZone
-	records map[string][]cloudflareDNSRecord
+	mu sync.Mutex
+
+	nextID                      int
+	zones                       []cloudflareZone
+	records                     map[string][]cloudflareDNSRecord
+	recordListIncludeResultInfo bool
+	listedRecordPages           []int
+	createCalls                 int
+	updateCalls                 int
+	deleteCalls                 int
 }
 
 func newCloudflareDNSTestFixture(t *testing.T) *cloudflareDNSTestFixture {
@@ -396,10 +572,11 @@ func newCloudflareDNSTestFixture(t *testing.T) *cloudflareDNSTestFixture {
 	fixture := &cloudflareDNSTestFixture{
 		t: t,
 		zones: []cloudflareZone{
-			{ID: "zone-1", Name: "fishystuff.fish"},
+			{ID: "zone-1", Name: "example.test"},
 		},
-		records: map[string][]cloudflareDNSRecord{},
-		nextID:  2,
+		records:                     map[string][]cloudflareDNSRecord{},
+		nextID:                      2,
+		recordListIncludeResultInfo: true,
 	}
 	fixture.server = httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
 	t.Cleanup(func() {
@@ -416,6 +593,21 @@ func (obj *cloudflareDNSTestFixture) recordsForZone(zoneID string) []cloudflareD
 	out := make([]cloudflareDNSRecord, len(records))
 	copy(out, records)
 	return out
+}
+
+func (obj *cloudflareDNSTestFixture) recordListPages() []int {
+	obj.mu.Lock()
+	defer obj.mu.Unlock()
+
+	out := make([]int, len(obj.listedRecordPages))
+	copy(out, obj.listedRecordPages)
+	return out
+}
+
+func (obj *cloudflareDNSTestFixture) mutationCounts() (int, int, int) {
+	obj.mu.Lock()
+	defer obj.mu.Unlock()
+	return obj.createCalls, obj.updateCalls, obj.deleteCalls
 }
 
 func cloudflareDNSTestContents(records []cloudflareDNSRecord) string {
@@ -511,10 +703,59 @@ func (obj *cloudflareDNSTestFixture) handleListRecords(w http.ResponseWriter, re
 		}
 		result = append(result, record)
 	}
-	obj.writeJSON(w, cloudflareEnvelope[[]cloudflareDNSRecord]{
+
+	page := 1
+	if raw := req.URL.Query().Get("page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			obj.t.Fatalf("invalid page query %q: %v", raw, err)
+		}
+		if value > 0 {
+			page = value
+		}
+	}
+	perPage := len(result)
+	if perPage == 0 {
+		perPage = 1
+	}
+	if raw := req.URL.Query().Get("per_page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			obj.t.Fatalf("invalid per_page query %q: %v", raw, err)
+		}
+		if value > 0 {
+			perPage = value
+		}
+	}
+	start := (page - 1) * perPage
+	if start > len(result) {
+		start = len(result)
+	}
+	end := start + perPage
+	if end > len(result) {
+		end = len(result)
+	}
+	pageResult := result[start:end]
+	obj.listedRecordPages = append(obj.listedRecordPages, page)
+
+	envelope := cloudflareEnvelope[[]cloudflareDNSRecord]{
 		Success: true,
-		Result:  result,
-	})
+		Result:  pageResult,
+	}
+	if obj.recordListIncludeResultInfo {
+		totalPages := 1
+		if len(result) > 0 {
+			totalPages = (len(result) + perPage - 1) / perPage
+		}
+		envelope.ResultInfo = &cloudflareResultInfo{
+			Page:       page,
+			PerPage:    perPage,
+			Count:      len(pageResult),
+			TotalCount: len(result),
+			TotalPages: totalPages,
+		}
+	}
+	obj.writeJSON(w, envelope)
 }
 
 func (obj *cloudflareDNSTestFixture) handleCreateRecord(w http.ResponseWriter, req *http.Request, zoneID string) {
@@ -538,6 +779,7 @@ func (obj *cloudflareDNSTestFixture) handleCreateRecord(w http.ResponseWriter, r
 	}
 
 	obj.nextID++
+	obj.createCalls++
 	obj.records[zoneID] = append(obj.records[zoneID], record)
 	obj.writeJSON(w, cloudflareEnvelope[cloudflareDNSRecord]{
 		Success: true,
@@ -556,6 +798,7 @@ func (obj *cloudflareDNSTestFixture) handleUpdateRecord(w http.ResponseWriter, r
 		if records[i].ID != recordID {
 			continue
 		}
+		obj.updateCalls++
 		records[i].Type = body.Type
 		records[i].Name = body.Name
 		records[i].Content = body.Content
@@ -589,6 +832,7 @@ func (obj *cloudflareDNSTestFixture) handleDeleteRecord(w http.ResponseWriter, z
 		if records[i].ID != recordID {
 			continue
 		}
+		obj.deleteCalls++
 		obj.records[zoneID] = append(records[:i], records[i+1:]...)
 		obj.writeJSON(w, cloudflareEnvelope[cloudflareDeleteResult]{
 			Success: true,

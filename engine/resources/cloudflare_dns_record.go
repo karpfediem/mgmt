@@ -39,6 +39,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/purpleidea/mgmt/engine"
@@ -56,6 +57,7 @@ const (
 
 	cloudflareDNSAPIBaseURL = "https://api.cloudflare.com/client/v4"
 	cloudflareDNSPollLimit  = 5
+	cloudflareDNSRecordPage = 100
 )
 
 var cloudflareDNSRecordTypes = map[string]struct{}{
@@ -277,25 +279,69 @@ func (obj *CloudflareDNSRecordRes) resolveZoneID(ctx context.Context) (string, e
 }
 
 func (obj *CloudflareDNSRecordRes) lookupRecords(ctx context.Context, zoneID, name, recordType string) ([]cloudflareDNSRecord, error) {
+	normalizedName := normalizeCloudflareDNSName(name)
 	values := url.Values{}
 	values.Set("type", recordType)
 	values.Set("name", name)
-	values.Set("per_page", "100")
+	values.Set("per_page", strconv.Itoa(cloudflareDNSRecordPage))
 
-	var envelope cloudflareEnvelope[[]cloudflareDNSRecord]
-	if err := obj.doJSON(ctx, http.MethodGet, fmt.Sprintf("/zones/%s/dns_records?%s", zoneID, values.Encode()), nil, &envelope); err != nil {
-		return nil, err
-	}
+	matches := []cloudflareDNSRecord{}
+	for page := 1; ; page++ {
+		values.Set("page", strconv.Itoa(page))
 
-	matches := make([]cloudflareDNSRecord, 0, len(envelope.Result))
-	for _, record := range envelope.Result {
-		if strings.EqualFold(record.Type, recordType) && normalizeCloudflareDNSName(record.Name) == normalizeCloudflareDNSName(name) {
-			record.Name = normalizeCloudflareDNSName(record.Name)
-			record.Content = normalizeCloudflareDNSExistingContent(record.Type, record.Content)
-			record.Tags = normalizeCloudflareDNSTags(record.Tags)
-			matches = append(matches, record)
+		var envelope cloudflareEnvelope[[]cloudflareDNSRecord]
+		if err := obj.doJSON(ctx, http.MethodGet, fmt.Sprintf("/zones/%s/dns_records?%s", zoneID, values.Encode()), nil, &envelope); err != nil {
+			return nil, err
 		}
+
+		if envelope.ResultInfo != nil {
+			info := envelope.ResultInfo
+			if info.Page > 0 && info.Page != page {
+				return nil, fmt.Errorf("cloudflare dns record lookup returned unexpected page metadata: requested page %d, got page %d", page, info.Page)
+			}
+			if info.TotalPages > 0 && info.TotalPages < page {
+				return nil, fmt.Errorf("cloudflare dns record lookup returned inconsistent pagination metadata: page %d exceeds total_pages %d", page, info.TotalPages)
+			}
+			if info.TotalPages > 0 && page < info.TotalPages && len(envelope.Result) == 0 {
+				return nil, fmt.Errorf("cloudflare dns record lookup returned empty page %d before the final page %d", page, info.TotalPages)
+			}
+		}
+
+		for _, record := range envelope.Result {
+			if strings.EqualFold(record.Type, recordType) && normalizeCloudflareDNSName(record.Name) == normalizedName {
+				record.Name = normalizeCloudflareDNSName(record.Name)
+				record.Content = normalizeCloudflareDNSExistingContent(record.Type, record.Content)
+				record.Tags = normalizeCloudflareDNSTags(record.Tags)
+				matches = append(matches, record)
+			}
+		}
+
+		if envelope.ResultInfo == nil {
+			if len(envelope.Result) < cloudflareDNSRecordPage {
+				break
+			}
+			return nil, fmt.Errorf("cloudflare dns record lookup returned %d records on page %d without pagination metadata; cannot safely reconcile incomplete record set", len(envelope.Result), page)
+		}
+
+		info := envelope.ResultInfo
+		if info.TotalPages > 0 {
+			if page >= info.TotalPages {
+				break
+			}
+			continue
+		}
+		if info.TotalCount > 0 && info.PerPage > 0 {
+			if page*info.PerPage >= info.TotalCount {
+				break
+			}
+			continue
+		}
+		if len(envelope.Result) < cloudflareDNSRecordPage {
+			break
+		}
+		return nil, fmt.Errorf("cloudflare dns record lookup returned a full page with incomplete pagination metadata; cannot safely reconcile incomplete record set")
 	}
+
 	slices.SortFunc(matches, func(a, b cloudflareDNSRecord) int {
 		if a.ID < b.ID {
 			return -1
@@ -697,10 +743,11 @@ func cloudflareEnvelopeError(value any) string {
 }
 
 type cloudflareEnvelope[T any] struct {
-	Success  bool                   `json:"success"`
-	Errors   []cloudflareAPIError   `json:"errors"`
-	Messages []cloudflareAPIMessage `json:"messages"`
-	Result   T                      `json:"result"`
+	Success    bool                   `json:"success"`
+	Errors     []cloudflareAPIError   `json:"errors"`
+	Messages   []cloudflareAPIMessage `json:"messages"`
+	Result     T                      `json:"result"`
+	ResultInfo *cloudflareResultInfo  `json:"result_info,omitempty"`
 }
 
 func (obj *cloudflareEnvelope[T]) errorString() string {
@@ -732,6 +779,14 @@ type cloudflareAPIError struct {
 type cloudflareAPIMessage struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+type cloudflareResultInfo struct {
+	Page       int `json:"page"`
+	PerPage    int `json:"per_page"`
+	Count      int `json:"count"`
+	TotalCount int `json:"total_count"`
+	TotalPages int `json:"total_pages"`
 }
 
 type cloudflareZone struct {
