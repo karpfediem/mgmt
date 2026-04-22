@@ -384,7 +384,9 @@ func (obj *AcmeRes) CheckApply(ctx context.Context, apply bool) (bool, error) {
 			if err := obj.saveState(state); err != nil {
 				return false, errwrap.Wrapf(err, "could not save ACME state")
 			}
-			obj.requestImmediateRecheck()
+			if err == nil {
+				obj.requestImmediateRecheck()
+			}
 		}
 		if err != nil {
 			return false, err
