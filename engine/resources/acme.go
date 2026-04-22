@@ -62,6 +62,12 @@ func init() {
 	engine.RegisterResource("acme:request", func() engine.Res { return &AcmeRes{} })
 }
 
+var acmeIDNAProfile = idna.New(
+	idna.MapForLookup(),
+	idna.BidiRule(),
+	idna.VerifyDNSLength(true),
+)
+
 const (
 	acmeStateFilename          = "state.json"
 	acmeDefaultRenewBeforeDays = 30
@@ -150,8 +156,8 @@ func (obj *AcmeRes) Validate() error {
 	if _, err := obj.certificateKeyType(); err != nil {
 		return err
 	}
-	if len(obj.desiredDomains()) == 0 {
-		return fmt.Errorf("the Domains field must not be empty")
+	if _, err := obj.desiredDomains(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -415,7 +421,15 @@ func (obj *AcmeRes) Cmp(r engine.Res) error {
 	if obj.Account != res.Account {
 		return fmt.Errorf("the Account field differs")
 	}
-	if !reflect.DeepEqual(obj.desiredDomains(), res.desiredDomains()) {
+	objDomains, err := obj.desiredDomains()
+	if err != nil {
+		return err
+	}
+	resDomains, err := res.desiredDomains()
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(objDomains, resDomains) {
 		return fmt.Errorf("the Domains field differs")
 	}
 	if obj.normalizedChallenge() != res.normalizedChallenge() {
@@ -726,7 +740,10 @@ func (obj *legoAcmeClient) EnsureRegistration(emailChanged, acceptTOS bool) (*re
 }
 
 func (obj *legoAcmeClient) BeginHTTP01(request acmeHTTP01IssueRequest) (*acmeHTTP01OrderState, error) {
-	domains := sanitizeACMEDomains(request.Domains)
+	domains, err := normalizeACMEDomains(request.Domains)
+	if err != nil {
+		return nil, err
+	}
 	if len(domains) == 0 {
 		return nil, fmt.Errorf("no domains to obtain a certificate for")
 	}
@@ -812,7 +829,10 @@ func (obj *legoAcmeClient) BeginHTTP01(request acmeHTTP01IssueRequest) (*acmeHTT
 }
 
 func (obj *legoAcmeClient) BeginDNS01(request acmeDNS01IssueRequest) (*acmeDNS01OrderState, error) {
-	domains := sanitizeACMEDomains(request.Domains)
+	domains, err := normalizeACMEDomains(request.Domains)
+	if err != nil {
+		return nil, err
+	}
 	if len(domains) == 0 {
 		return nil, fmt.Errorf("no domains to obtain a certificate for")
 	}
@@ -1113,7 +1133,10 @@ func (obj *AcmeRes) planState(state *acmeStoredState, refresh bool, now time.Tim
 	plan := &acmePlan{}
 	state = state.clone()
 
-	desiredDomains := obj.desiredDomains()
+	desiredDomains, err := obj.desiredDomains()
+	if err != nil {
+		return nil, err
+	}
 	keyType, err := obj.certificateKeyType()
 	if err != nil {
 		return nil, err
@@ -1241,8 +1264,12 @@ func (obj *AcmeRes) reconcileState(state *acmeStoredState, plan *acmePlan, accou
 
 func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acmeAccountData, client acmeClient, plan *acmePlan) (*acmeStoredState, error) {
 	if plan.prepare {
+		domains, err := obj.desiredDomains()
+		if err != nil {
+			return nil, err
+		}
 		orderState, err := client.BeginHTTP01(acmeHTTP01IssueRequest{
-			Domains:        obj.desiredDomains(),
+			Domains:        domains,
 			MustStaple:     obj.MustStaple,
 			PreferredChain: obj.PreferredChain,
 		})
@@ -1317,8 +1344,12 @@ func (obj *AcmeRes) reconcileHTTP01State(next *acmeStoredState, accountData *acm
 
 func (obj *AcmeRes) reconcileDNS01State(next *acmeStoredState, accountData *acmeAccountData, client acmeClient, plan *acmePlan) (*acmeStoredState, error) {
 	if plan.prepare {
+		domains, err := obj.desiredDomains()
+		if err != nil {
+			return nil, err
+		}
 		orderState, err := client.BeginDNS01(acmeDNS01IssueRequest{
-			Domains:        obj.desiredDomains(),
+			Domains:        domains,
 			MustStaple:     obj.MustStaple,
 			PreferredChain: obj.PreferredChain,
 		})
@@ -1396,7 +1427,11 @@ func (obj *AcmeRes) finalizeStateMetadata(next *acmeStoredState, accountData *ac
 	if accountData != nil {
 		next.DirectoryURL = accountData.DirectoryURL
 	}
-	next.Domains = obj.desiredDomains()
+	domains, err := obj.desiredDomains()
+	if err != nil {
+		return nil, err
+	}
+	next.Domains = domains
 	keyType, err := obj.certificateKeyType()
 	if err != nil {
 		return nil, err
@@ -1531,23 +1566,19 @@ func (obj *AcmeRes) newLegoClient(_ *acmeStoredState, accountData *acmeAccountDa
 	return baseClient, nil
 }
 
-func (obj *AcmeRes) desiredDomains() []string {
+func (obj *AcmeRes) desiredDomains() ([]string, error) {
 	domains := obj.Domains
 	if len(domains) == 0 && obj.Name() != "" {
 		domains = []string{obj.Name()}
 	}
-
-	result := []string{}
-	for _, domain := range domains {
-		domain = strings.TrimSpace(domain)
-		if domain == "" {
-			continue
-		}
-		if !strInList(domain, result) {
-			result = append(result, domain)
-		}
+	result, err := normalizeACMEDomains(domains)
+	if err != nil {
+		return nil, err
 	}
-	return result
+	if len(result) == 0 {
+		return nil, fmt.Errorf("the Domains field must not be empty")
+	}
+	return result, nil
 }
 
 func (obj *AcmeRes) normalizedChallenge() string {
@@ -1718,16 +1749,50 @@ func timerChan(timer *time.Timer) <-chan time.Time {
 	return timer.C
 }
 
-func sanitizeACMEDomains(domains []string) []string {
+func normalizeACMEDomain(domain string) (string, error) {
+	trimmed := strings.TrimSpace(domain)
+	if trimmed == "" {
+		return "", fmt.Errorf("domain must not be empty")
+	}
+
+	wildcard := false
+	if strings.HasPrefix(trimmed, "*.") {
+		wildcard = true
+		trimmed = strings.TrimPrefix(trimmed, "*.")
+		if trimmed == "" {
+			return "", fmt.Errorf("wildcard domain must include a non-empty suffix")
+		}
+	}
+	if strings.Contains(trimmed, "*") {
+		return "", fmt.Errorf("domain contains an invalid wildcard")
+	}
+
+	normalized, err := acmeIDNAProfile.ToASCII(trimmed)
+	if err != nil {
+		return "", errwrap.Wrapf(err, "domain is not valid IDNA")
+	}
+	if normalized == "" {
+		return "", fmt.Errorf("domain normalized to empty")
+	}
+	if wildcard {
+		return "*." + normalized, nil
+	}
+	return normalized, nil
+}
+
+func normalizeACMEDomains(domains []string) ([]string, error) {
 	result := []string{}
 	for _, domain := range domains {
-		sanitized, err := idna.ToASCII(strings.TrimSpace(domain))
-		if err != nil || sanitized == "" {
+		normalized, err := normalizeACMEDomain(domain)
+		if err != nil {
+			return nil, fmt.Errorf("invalid domain %q: %w", domain, err)
+		}
+		if strInList(normalized, result) {
 			continue
 		}
-		result = append(result, sanitized)
+		result = append(result, normalized)
 	}
-	return result
+	return result, nil
 }
 
 func decodeCSRPEM(csrPEM string) ([]byte, error) {

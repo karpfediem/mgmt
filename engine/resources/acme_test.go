@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"math/big"
 	"path"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -791,6 +792,133 @@ func TestAcmeValidateAcceptsDNSChallengeWithSolver(t *testing.T) {
 
 	if err := res.Validate(); err != nil {
 		t.Fatalf("expected DNS challenge config to validate, got: %v", err)
+	}
+}
+
+func TestAcmeValidateAcceptsMultipleDomains(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"example.com", "www.example.com"}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	if err := res.Validate(); err != nil {
+		t.Fatalf("expected multiple domains to validate, got: %v", err)
+	}
+}
+
+func TestAcmeValidateRejectsEmptyDomainEntry(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{""}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	err := res.Validate()
+	if err == nil || !strings.Contains(err.Error(), "domain must not be empty") {
+		t.Fatalf("expected empty domain validation error, got: %v", err)
+	}
+}
+
+func TestAcmeValidateRejectsWhitespaceOnlyDomainEntry(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"   "}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	err := res.Validate()
+	if err == nil || !strings.Contains(err.Error(), "domain must not be empty") {
+		t.Fatalf("expected whitespace-only domain validation error, got: %v", err)
+	}
+}
+
+func TestAcmeValidateRejectsInvalidDomainWithSpaces(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"invalid domain"}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	err := res.Validate()
+	if err == nil || !strings.Contains(err.Error(), "invalid domain") {
+		t.Fatalf("expected invalid domain validation error, got: %v", err)
+	}
+}
+
+func TestAcmeValidateAcceptsIDNADomainAndNormalizesIt(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"bücher.example"}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	if err := res.Validate(); err != nil {
+		t.Fatalf("expected IDNA domain to validate, got: %v", err)
+	}
+
+	domains, err := res.desiredDomains()
+	if err != nil {
+		t.Fatalf("desiredDomains failed: %v", err)
+	}
+	if !reflect.DeepEqual(domains, []string{"xn--bcher-kva.example"}) {
+		t.Fatalf("expected normalized IDNA domain, got: %#v", domains)
+	}
+}
+
+func TestAcmeValidateAcceptsWildcardDomainAndNormalizesIt(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"example.com", "*.bücher.example"}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	if err := res.Validate(); err != nil {
+		t.Fatalf("expected wildcard domains to validate, got: %v", err)
+	}
+
+	domains, err := res.desiredDomains()
+	if err != nil {
+		t.Fatalf("desiredDomains failed: %v", err)
+	}
+	if !reflect.DeepEqual(domains, []string{"example.com", "*.xn--bcher-kva.example"}) {
+		t.Fatalf("expected normalized wildcard domains, got: %#v", domains)
+	}
+}
+
+func TestAcmeValidateRejectsInvalidWildcardDomain(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"*.*.example.com"}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	err := res.Validate()
+	if err == nil || !strings.Contains(err.Error(), "invalid wildcard") {
+		t.Fatalf("expected invalid wildcard validation error, got: %v", err)
+	}
+}
+
+func TestAcmeValidateRejectsMixedValidAndInvalidDomains(t *testing.T) {
+	res := (&AcmeRes{}).Default().(*AcmeRes)
+	res.Account = "public-ca"
+	res.Domains = []string{"valid.example", "invalid domain"}
+	res.Challenge = acmeChallengeDNS01
+	res.Solver = "public-dns01"
+
+	err := res.Validate()
+	if err == nil || !strings.Contains(err.Error(), "invalid domain") {
+		t.Fatalf("expected mixed-domain validation error, got: %v", err)
+	}
+}
+
+func TestNormalizeACMEDomainsRejectsMixedValidAndInvalidInput(t *testing.T) {
+	domains, err := normalizeACMEDomains([]string{"valid.example", "invalid domain"})
+	if err == nil || !strings.Contains(err.Error(), "invalid domain") {
+		t.Fatalf("expected mixed-domain normalization error, got: %v", err)
+	}
+	if domains != nil {
+		t.Fatalf("expected no normalized domains on error, got: %#v", domains)
 	}
 }
 
