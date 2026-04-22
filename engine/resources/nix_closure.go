@@ -323,23 +323,22 @@ func (obj *NixClosureRes) explicitDrvs() []string {
 	return uniqueSorted(obj.Drvs)
 }
 
-func (obj *NixClosureRes) desiredRoots(ctx context.Context) ([]string, bool, error) {
-	if paths := obj.explicitPaths(); len(paths) > 0 {
-		return paths, true, nil
-	}
-	if obj.isStorePath(obj.Name()) && !strings.HasSuffix(obj.Name(), ".drv") {
-		return []string{obj.Name()}, true, nil
-	}
-
+func (obj *NixClosureRes) configuredInputs() ([]string, []string) {
+	paths := obj.explicitPaths()
 	drvs := obj.explicitDrvs()
-	if len(drvs) == 0 && obj.isStorePath(obj.Name()) && strings.HasSuffix(obj.Name(), ".drv") {
-		drvs = []string{obj.Name()}
+	if len(paths) == 0 && len(drvs) == 0 && obj.isStorePath(obj.Name()) {
+		if strings.HasSuffix(obj.Name(), ".drv") {
+			drvs = []string{obj.Name()}
+		} else {
+			paths = []string{obj.Name()}
+		}
 	}
-	if len(drvs) == 0 {
-		return nil, false, nil
-	}
+	return paths, drvs
+}
 
-	var roots []string
+func (obj *NixClosureRes) desiredRoots(ctx context.Context) ([]string, bool, error) {
+	paths, drvs := obj.configuredInputs()
+	roots := append([]string{}, paths...)
 	for _, drv := range drvs {
 		outputs, ok, err := obj.queryDrvOutputs(ctx, drv)
 		if err != nil {
@@ -355,12 +354,9 @@ func (obj *NixClosureRes) desiredRoots(ctx context.Context) ([]string, bool, err
 }
 
 func (obj *NixClosureRes) realiseInputs() []string {
-	inputs := []string{}
-	inputs = append(inputs, obj.explicitPaths()...)
-	inputs = append(inputs, obj.explicitDrvs()...)
-	if len(inputs) == 0 && obj.isStorePath(obj.Name()) {
-		inputs = append(inputs, obj.Name())
-	}
+	paths, drvs := obj.configuredInputs()
+	inputs := append([]string{}, paths...)
+	inputs = append(inputs, drvs...)
 	return uniqueSorted(inputs)
 }
 

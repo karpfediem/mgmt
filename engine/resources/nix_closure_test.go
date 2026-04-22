@@ -138,6 +138,165 @@ func TestNixClosureResCheckApplyRealiseDrvOutputs(t *testing.T) {
 	}
 }
 
+func TestNixClosureResCheckApplyVerifyMixedInputsMissingDrvOutputNotConverged(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeNixStore(t)
+	path := "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-static-assets"
+	drv := "/nix/store/ffffffffffffffffffffffffffffffff-app.drv"
+	out := "/nix/store/11111111111111111111111111111111-app"
+	fake.markValid(path)
+	fake.addDrvOutputs(drv, out)
+
+	res := &NixClosureRes{
+		Paths:    []string{path},
+		Drvs:     []string{drv},
+		Mode:     NixClosureModeVerify,
+		NixStore: fake.path,
+		StoreDir: "/nix/store",
+		MaxJobs:  -1,
+		Cores:    -1,
+	}
+	if err := res.Validate(); err != nil {
+		t.Fatalf("validate failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected mixed path+drv inputs to stay non-converged when the drv output is absent")
+	}
+}
+
+func TestNixClosureResCheckApplyVerifyMixedInputsPresent(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeNixStore(t)
+	path := "/nix/store/22222222222222222222222222222222-static-assets"
+	drv := "/nix/store/33333333333333333333333333333333-app.drv"
+	out := "/nix/store/44444444444444444444444444444444-app"
+	fake.markValid(path)
+	fake.markValid(out)
+	fake.addDrvOutputs(drv, out)
+
+	res := &NixClosureRes{
+		Paths:    []string{path},
+		Drvs:     []string{drv},
+		Mode:     NixClosureModeVerify,
+		NixStore: fake.path,
+		StoreDir: "/nix/store",
+		MaxJobs:  -1,
+		Cores:    -1,
+	}
+	if err := res.Validate(); err != nil {
+		t.Fatalf("validate failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if !checkOK {
+		t.Fatalf("expected mixed path+drv inputs to converge when both roots are present")
+	}
+}
+
+func TestNixClosureResCheckApplyVerifyFallsBackToName(t *testing.T) {
+	t.Parallel()
+
+	t.Run("path", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeNixStore(t)
+		root := "/nix/store/55555555555555555555555555555555-name-fallback"
+		fake.markValid(root)
+
+		res := &NixClosureRes{
+			Mode:     NixClosureModeVerify,
+			NixStore: fake.path,
+			StoreDir: "/nix/store",
+			MaxJobs:  -1,
+			Cores:    -1,
+		}
+		res.SetName(root)
+		if err := res.Validate(); err != nil {
+			t.Fatalf("validate failed: %v", err)
+		}
+
+		checkOK, err := res.CheckApply(context.Background(), false)
+		if err != nil {
+			t.Fatalf("checkapply failed: %v", err)
+		}
+		if !checkOK {
+			t.Fatalf("expected store-path resource name to act as the fallback root")
+		}
+	})
+
+	t.Run("drv", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeNixStore(t)
+		drv := "/nix/store/66666666666666666666666666666666-name-fallback.drv"
+		out := "/nix/store/77777777777777777777777777777777-name-fallback"
+		fake.markValid(out)
+		fake.addDrvOutputs(drv, out)
+
+		res := &NixClosureRes{
+			Mode:     NixClosureModeVerify,
+			NixStore: fake.path,
+			StoreDir: "/nix/store",
+			MaxJobs:  -1,
+			Cores:    -1,
+		}
+		res.SetName(drv)
+		if err := res.Validate(); err != nil {
+			t.Fatalf("validate failed: %v", err)
+		}
+
+		checkOK, err := res.CheckApply(context.Background(), false)
+		if err != nil {
+			t.Fatalf("checkapply failed: %v", err)
+		}
+		if !checkOK {
+			t.Fatalf("expected derivation resource name to fall back through its resolved outputs")
+		}
+	})
+}
+
+func TestNixClosureResCheckApplyVerifyExplicitInputsSuppressNameFallback(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeNixStore(t)
+	nameRoot := "/nix/store/88888888888888888888888888888888-name-root"
+	drv := "/nix/store/99999999999999999999999999999999-explicit.drv"
+	out := "/nix/store/abababababababababababababababab-explicit"
+	fake.markValid(nameRoot)
+	fake.addDrvOutputs(drv, out)
+
+	res := &NixClosureRes{
+		Drvs:     []string{drv},
+		Mode:     NixClosureModeVerify,
+		NixStore: fake.path,
+		StoreDir: "/nix/store",
+		MaxJobs:  -1,
+		Cores:    -1,
+	}
+	res.SetName(nameRoot)
+	if err := res.Validate(); err != nil {
+		t.Fatalf("validate failed: %v", err)
+	}
+
+	checkOK, err := res.CheckApply(context.Background(), false)
+	if err != nil {
+		t.Fatalf("checkapply failed: %v", err)
+	}
+	if checkOK {
+		t.Fatalf("expected explicit drvs to suppress name fallback when their outputs are still absent")
+	}
+}
+
 type fakeNixStore struct {
 	path    string
 	valid   string
