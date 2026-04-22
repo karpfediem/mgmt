@@ -33,7 +33,9 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,6 +313,110 @@ func TestAcmeDNS01SolverReportsPropagationError(t *testing.T) {
 	}
 	if entry.Error == "" {
 		t.Fatalf("expected stored propagation error")
+	}
+}
+
+func TestAcmeDNS01SolverWaitForDNSPropagationCanceledBeforeInitialDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := acmeWaitForDNSPropagation(ctx, acmeDNS01Challenge{
+		FQDN:  "_acme-challenge.example.com.",
+		Value: "txt-value",
+	}, 5*time.Second, 1*time.Second, func(string, string, []string) (bool, error) {
+		t.Fatalf("unexpected DNS propagation check after context cancellation")
+		return false, nil
+	})
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("expected prompt cancellation before initial delay, got: %s", elapsed)
+	}
+}
+
+func TestAcmeDNS01SolverWaitForDNSPropagationCanceledDuringPolling(t *testing.T) {
+	var attempts atomic.Int32
+	firstAttempt := make(chan struct{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- acmeWaitForDNSPropagation(ctx, acmeDNS01Challenge{
+			FQDN:  "_acme-challenge.example.com.",
+			Value: "txt-value",
+		}, 5*time.Second, 10*time.Millisecond, func(string, string, []string) (bool, error) {
+			if attempts.Add(1) == 1 {
+				close(firstAttempt)
+			}
+			return false, nil
+		})
+	}()
+
+	select {
+	case <-firstAttempt:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for first propagation poll")
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != context.Canceled {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatalf("timed out waiting for propagation wait to exit after cancellation")
+	}
+
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected one propagation poll before cancellation, got: %d", got)
+	}
+}
+
+func TestAcmeDNS01SolverWaitForDNSPropagationSuccess(t *testing.T) {
+	var attempts atomic.Int32
+	err := acmeWaitForDNSPropagation(context.Background(), acmeDNS01Challenge{
+		FQDN:  "_acme-challenge.example.com.",
+		Value: "txt-value",
+	}, 100*time.Millisecond, 1*time.Millisecond, func(string, string, []string) (bool, error) {
+		attempts.Add(1)
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("waitForDNSPropagation failed: %v", err)
+	}
+
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected one propagation poll, got: %d", got)
+	}
+}
+
+func TestAcmeDNS01SolverWaitForDNSPropagationTimeout(t *testing.T) {
+	var attempts atomic.Int32
+	checkErr := errors.New("not yet")
+	err := acmeWaitForDNSPropagation(context.Background(), acmeDNS01Challenge{
+		FQDN:  "_acme-challenge.example.com.",
+		Value: "txt-value",
+	}, 25*time.Millisecond, 5*time.Millisecond, func(string, string, []string) (bool, error) {
+		attempts.Add(1)
+		return false, checkErr
+	})
+	if err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	if !errors.Is(err, checkErr) {
+		t.Fatalf("expected timeout error to wrap the last propagation error, got: %v", err)
+	}
+	if err.Error() != "dns-01 propagation: time limit exceeded: last error: not yet" {
+		t.Fatalf("unexpected timeout error: %v", err)
+	}
+	if got := attempts.Load(); got == 0 {
+		t.Fatalf("expected at least one propagation poll before timeout")
 	}
 }
 

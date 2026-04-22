@@ -46,7 +46,6 @@ import (
 
 	legochallenge "github.com/go-acme/lego/v4/challenge"
 	legodns01 "github.com/go-acme/lego/v4/challenge/dns01"
-	"github.com/go-acme/lego/v4/platform/wait"
 	legodns "github.com/go-acme/lego/v4/providers/dns"
 	"github.com/miekg/dns"
 )
@@ -412,16 +411,91 @@ func newLegoDNSChallengeProvider(provider string, env map[string]string) (legoch
 	return result, nil
 }
 
-func (obj *AcmeDNS01SolverRes) waitForDNSPropagation(_ context.Context, challenge acmeDNS01Challenge) error {
+func (obj *AcmeDNS01SolverRes) waitForDNSPropagation(ctx context.Context, challenge acmeDNS01Challenge) error {
 	timeout, interval := acmeDNSDefaultPropagationTimeout, acmeDNSDefaultPollingInterval
 	if provider, ok := obj.provider.(legochallenge.ProviderTimeout); ok {
 		timeout, interval = provider.Timeout()
 	}
 
-	time.Sleep(interval)
-	return wait.For("dns-01 propagation", timeout, interval, func() (bool, error) {
-		return acmeDNS01TXTVisible(challenge.FQDN, challenge.Value, acmeDNSRecursiveNameservers())
-	})
+	return acmeWaitForDNSPropagation(ctx, challenge, timeout, interval, acmeDNS01TXTVisible)
+}
+
+func acmeWaitForDuration(ctx context.Context, duration time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	timer := time.NewTimer(duration)
+	defer acmeStopTimer(timer)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func acmeStopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func acmeWaitForDNSPropagation(ctx context.Context, challenge acmeDNS01Challenge, timeout, interval time.Duration, dnsTXTVisible func(string, string, []string) (bool, error)) error {
+	if err := acmeWaitForDuration(ctx, interval); err != nil {
+		return err
+	}
+
+	recursiveNameservers := acmeDNSRecursiveNameservers()
+	timeoutTimer := time.NewTimer(timeout)
+	defer acmeStopTimer(timeoutTimer)
+
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		select {
+		case <-timeoutTimer.C:
+			return acmeDNSPropagationTimeoutError(lastErr)
+		default:
+		}
+
+		stop, err := dnsTXTVisible(challenge.FQDN, challenge.Value, recursiveNameservers)
+		if stop {
+			return err
+		}
+		if err != nil {
+			lastErr = err
+		}
+
+		intervalTimer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			acmeStopTimer(intervalTimer)
+			return ctx.Err()
+		case <-timeoutTimer.C:
+			acmeStopTimer(intervalTimer)
+			return acmeDNSPropagationTimeoutError(lastErr)
+		case <-intervalTimer.C:
+		}
+	}
+}
+
+func acmeDNSPropagationTimeoutError(lastErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("dns-01 propagation: time limit exceeded")
+	}
+
+	return fmt.Errorf("dns-01 propagation: time limit exceeded: last error: %w", lastErr)
 }
 
 func acmeDNSRecursiveNameservers() []string {
