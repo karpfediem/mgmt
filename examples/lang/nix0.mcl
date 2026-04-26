@@ -1,0 +1,12 @@
+# Replace this placeholder with a store path that exists or can be substituted.
+nix:closure "example-closure" {
+	paths => ["/nix/store/00000000000000000000000000000000-example",],
+	mode => "substitute",
+	nix_store => "/nix/var/nix/profiles/default/bin/nix-store",
+}
+
+nix:gcroot "/nix/var/nix/gcroots/example-current" {
+	target => "/nix/store/00000000000000000000000000000000-example",
+
+	Depend => Nix:Closure["example-closure"],
+}
