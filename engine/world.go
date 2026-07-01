@@ -106,6 +106,8 @@ type StrWorld interface {
 	StrWatch(ctx context.Context, namespace string) (chan error, error)
 	StrIsNotExist(error) bool
 	StrGet(ctx context.Context, namespace string) (string, error)
+	StrListWatch(ctx context.Context, prefix string) (chan error, error)
+	StrList(ctx context.Context, prefix string) ([]string, error)
 	StrSet(ctx context.Context, namespace, value string) error
 	StrDel(ctx context.Context, namespace string) error
 

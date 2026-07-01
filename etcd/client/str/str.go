@@ -32,6 +32,8 @@ package str
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/purpleidea/mgmt/etcd/interfaces"
 	"github.com/purpleidea/mgmt/util/errwrap"
@@ -56,6 +58,44 @@ func WatchStr(ctx context.Context, client interfaces.Client, key string) (chan e
 	// new key structure is $NS/strings/$key = $data
 	path := fmt.Sprintf("%s/strings/%s", ns, key)
 	return client.Watcher(ctx, path)
+}
+
+// WatchStrList returns a channel which spits out events on prefix activity.
+func WatchStrList(ctx context.Context, client interfaces.Client, prefix string) (chan error, error) {
+	// new key structure is $NS/strings/$key = $data
+	path := fmt.Sprintf("%s/strings/%s", ns, prefix)
+	return client.Watcher(ctx, path, etcd.WithPrefix())
+}
+
+// ListStr collects the world string keys which match a global namespace prefix.
+func ListStr(ctx context.Context, client interfaces.Client, prefix string) ([]string, error) {
+	// new key structure is $NS/strings/$key = $data
+	root := fmt.Sprintf("%s/strings/", ns)
+	path := root + prefix
+	keyMap, err := client.Get(
+		ctx,
+		path,
+		etcd.WithPrefix(),
+		etcd.WithKeysOnly(),
+		etcd.WithSort(etcd.SortByKey, etcd.SortAscend),
+	)
+	if err != nil {
+		return nil, errwrap.Wrapf(err, "could not list strings in: %s", prefix)
+	}
+
+	return logicalStrKeys(root, keyMap), nil
+}
+
+func logicalStrKeys(root string, keyMap map[string]string) []string {
+	var keys []string
+	for key := range keyMap {
+		if !strings.HasPrefix(key, root) {
+			continue
+		}
+		keys = append(keys, key[len(root):])
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // GetStr collects the string which matches a global namespace in etcd.

@@ -224,6 +224,17 @@ func (obj *World) StrGet(ctx context.Context, namespace string) (string, error) 
 	return str.GetStr(ctx, obj.client, namespace)
 }
 
+// StrListWatch returns a channel which spits out events on possible string key
+// list changes.
+func (obj *World) StrListWatch(ctx context.Context, prefix string) (chan error, error) {
+	return str.WatchStrList(ctx, obj.client, prefix)
+}
+
+// StrList returns all string keys under the given namespace prefix.
+func (obj *World) StrList(ctx context.Context, prefix string) ([]string, error) {
+	return str.ListStr(ctx, obj.client, prefix)
+}
+
 // StrSet sets the namespace value to a particular string.
 // XXX: This can overwrite another hosts value that was set with StrMapSet. Add
 // possible cryptographic signing or special namespacing to prevent such things.
