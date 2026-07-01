@@ -55,6 +55,9 @@ type Member struct {
 	// Name for the member which if not not started will be an empty string.
 	Name string
 
+	// IsLearner tells whether this member is a non-voting raft learner.
+	IsLearner bool
+
 	// IsLeader tells which member is leading the cluster. Expect this to
 	// change as time goes on.
 	// XXX: add when new version of etcd supports this

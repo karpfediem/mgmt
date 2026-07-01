@@ -556,8 +556,9 @@ func (obj *Simple) WatchMembers(ctx context.Context) (<-chan *interfaces.Members
 				}
 
 				member := &interfaces.Member{
-					ID:   m.ID,
-					Name: m.Name,
+					ID:        m.ID,
+					Name:      m.Name,
+					IsLearner: m.IsLearner,
 					//IsLeader: m.IsLeader, // XXX: add when new version of etcd supports this
 					PeerURLs:   purls,
 					ClientURLs: curls,
